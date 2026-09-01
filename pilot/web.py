@@ -752,6 +752,9 @@ class Handler(BaseHTTPRequestHandler):
               </div>
             </details>
             """
+            review_hint = "Önce üst bölümden Gmail ile giriş yapın veya oturum yükleyin."
+
+
 
         folder_error_html = f"<p class='error'>{html.escape(folder_error)}</p>" if folder_error else ""
         advanced_open = " open" if folder or folder_error else ""
