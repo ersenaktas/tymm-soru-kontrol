@@ -30,7 +30,11 @@ BRAND_LOGO_PATH = ROOT / "assets" / "OGM_logo_beyaz_yatay.png"
 PILOT_BUILD = "0.6.47-larger-header-logo"
 FAKE_MODE = os.environ.get("PILOT_FAKE") == "1"
 SERVER_MODE = bool(os.environ.get("PORT") or os.environ.get("RENDER") or os.environ.get("PILOT_SERVER_MODE") == "1")
-SERVER_AUTH_CONFIGURED = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip())
+SERVER_AUTH_PATH = os.environ.get("PILOT_NOTEBOOKLM_STORAGE_PATH", "").strip()
+SERVER_AUTH_CONFIGURED = bool(
+    os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip()
+    or (SERVER_AUTH_PATH and Path(SERVER_AUTH_PATH).is_file())
+)
 provider = FakeNotebookProvider() if FAKE_MODE else NotebookLMPyProvider()
 if FAKE_MODE:
     provider.logged_in = True
@@ -637,7 +641,7 @@ class Handler(BaseHTTPRequestHandler):
             connection_actions = "<form method='post'><button name='action' value='connect'>Bağlantıyı doğrula</button></form>"
             review_hint = "Önce üst bölümden sunucu bağlantısını doğrulayın."
         elif SERVER_MODE:
-            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Sunucu kimliği eksik</span><p>Render Environment bölümüne NOTEBOOKLM_AUTH_JSON gizli değişkenini ekleyin.</p>"
+            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Sunucu kimliği eksik</span><p>Render'a storage_state.json gizli dosyasını ekleyin.</p>"
             connection_actions = "<form method='post'><button name='action' value='connect'>Yapılandırmayı kontrol et</button></form>"
             review_hint = "Önce Render'da sunucu kimliğini yapılandırın."
         else:
@@ -807,7 +811,7 @@ class Handler(BaseHTTPRequestHandler):
                             body += f"<p><a class='button secondary' href='{raw_url}'>Korunan NotebookLM yanıtını indir</a></p>"
                         if is_auth_error(item["error"]):
                             if SERVER_MODE:
-                                body += "<p class='warn'>Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. Render'daki NOTEBOOKLM_AUTH_JSON gizli değişkenini güncelledikten sonra yeniden denetleyin.</p><form method='post'><button name='action' value='reconnect'>Sunucu bağlantısını denetle</button></form>"
+                                body += "<p class='warn'>Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. Render'daki storage_state.json gizli dosyasını güncelledikten sonra yeniden denetleyin.</p><form method='post'><button name='action' value='reconnect'>Sunucu bağlantısını denetle</button></form>"
                             else:
                                 body += "<p class='warn'>NotebookLM Gmail oturumu geçersiz veya süresi dolmuş. Aşağıdaki düğmeyle yeniden giriş yapın.</p><form method='post'><button name='action' value='reconnect'>Gmail girişini yenile</button></form>"
                     else:
@@ -954,7 +958,7 @@ class Handler(BaseHTTPRequestHandler):
             if action == "disconnect":
                 if SERVER_MODE:
                     connected = False
-                    return self._page("<div class='card'><p>Sunucu kimliği uygulama içinden silinmez. Render Environment bölümündeki NOTEBOOKLM_AUTH_JSON değişkenini kaldırın.</p><a href='/'>Geri</a></div>")
+                    return self._page("<div class='card'><p>Sunucu kimliği uygulama içinden silinmez. Render Environment bölümündeki storage_state.json gizli dosyasını kaldırın.</p><a href='/'>Geri</a></div>")
                 asyncio.run(provider.disconnect(clear_auth=True)); connected = False
                 return self._page("<div class='card'><p>Bağlantı kaldırıldı ve yerel NotebookLM oturumu temizlendi.</p><a href='/'>Geri</a></div>")
             if action != "review": return self._page("<div class='card'><p>Bilinmeyen işlem.</p><a href='/'>Geri</a></div>")

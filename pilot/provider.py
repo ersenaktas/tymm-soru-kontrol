@@ -54,10 +54,33 @@ class NotebookLMPyProvider:
 
     def __init__(self):
         self.client = None; self._context = None
+
+    @staticmethod
+    def _storage_path() -> Path | None:
+        """Return an explicitly mounted auth file without exposing its data."""
+        raw = os.environ.get("PILOT_NOTEBOOKLM_STORAGE_PATH", "").strip()
+        return Path(raw) if raw else None
+
+    @classmethod
+    def _cli_command(cls, *arguments: str) -> list[str]:
+        command = [sys.executable, "-m", "notebooklm"]
+        storage_path = cls._storage_path()
+        if storage_path is not None:
+            command += ["--storage", str(storage_path)]
+        command += list(arguments)
+        return command
+
+    @classmethod
+    def _client_from_storage(cls, client_type, **kwargs):
+        storage_path = cls._storage_path()
+        if storage_path is not None:
+            return client_type.from_storage(storage_path, **kwargs)
+        return client_type.from_storage(**kwargs)
+
     async def login(self, browser: str = "chrome", force: bool = False) -> None:
         # A deployed web server cannot open a browser window on the visitor's
         # computer. In server mode authentication must be supplied out of band
-        # through NOTEBOOKLM_AUTH_JSON (for example as a Render secret).
+        # through NOTEBOOKLM_AUTH_JSON or a mounted Render secret file.
         server_mode = bool(
             os.environ.get("PORT")
             or os.environ.get("RENDER")
@@ -70,7 +93,7 @@ class NotebookLMPyProvider:
             try:
                 local_check = await asyncio.to_thread(
                     subprocess.run,
-                    [sys.executable, "-m", "notebooklm", "--quiet", "auth", "check"],
+                    self._cli_command("--quiet", "auth", "check"),
                     check=False,
                     capture_output=True,
                     text=True,
@@ -85,7 +108,7 @@ class NotebookLMPyProvider:
                 try:
                     token_check = await asyncio.to_thread(
                         subprocess.run,
-                        [sys.executable, "-m", "notebooklm", "--quiet", "auth", "check", "--test", "--passive"],
+                        self._cli_command("--quiet", "auth", "check", "--test", "--passive"),
                         check=False,
                         capture_output=True,
                         text=True,
@@ -99,15 +122,17 @@ class NotebookLMPyProvider:
                     return
 
         if server_mode:
-            if not os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip():
+            storage_path = self._storage_path()
+            has_auth_file = storage_path is not None and storage_path.is_file()
+            if not os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip() and not has_auth_file:
                 raise RuntimeError(
                     "Sunucuda etkileşimli Gmail penceresi açılamaz. "
-                    "Render Environment bölümüne NOTEBOOKLM_AUTH_JSON gizli değişkenini ekleyin."
+                    "Render'a storage_state.json gizli dosyasını ekleyin."
                 )
             raise RuntimeError(
                 "Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. "
-                "Yerel bilgisayarda yeniden giriş yapıp Render'daki "
-                "NOTEBOOKLM_AUTH_JSON gizli değişkenini güncelleyin ve servisi yeniden dağıtın."
+                "Yerel bilgisayarda yeniden giriş yapıp Render'daki storage_state.json "
+                "gizli dosyasını güncelleyin ve servisi yeniden dağıtın."
             )
 
         if force:
@@ -117,7 +142,7 @@ class NotebookLMPyProvider:
             try:
                 await asyncio.to_thread(
                     subprocess.run,
-                    [sys.executable, "-m", "notebooklm", "auth", "logout"],
+                    self._cli_command("auth", "logout"),
                     check=False,
                     capture_output=True,
                     text=True,
@@ -128,7 +153,7 @@ class NotebookLMPyProvider:
             except (OSError, subprocess.TimeoutExpired):
                 pass
 
-        command = [sys.executable, "-m", "notebooklm", "login"]
+        command = self._cli_command("login")
         if browser == "firefox": command += ["--browser-cookies", "firefox"]
         else: command += ["--browser", browser, "--browser-timeout", "600"]
         try:
@@ -166,7 +191,7 @@ class NotebookLMPyProvider:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
             raise RuntimeError("notebooklm-py kurulu değil; pip install -e .[notebooklm]") from exc
-        self._context = NotebookLMClient.from_storage()
+        self._context = self._client_from_storage(NotebookLMClient)
         self.client = await self._context.__aenter__()
 
     async def review(self, prompt: str, question_file: Path, subject: str, subject_file: Path | None = None, on_progress=None, *, question_title: str | None = None, delivery_instruction: str | None = None, report_mode: str = "full") -> str:
@@ -181,7 +206,8 @@ class NotebookLMPyProvider:
 
         # The client is created and closed inside the same asyncio loop as the job.
         # Timeouts match the established project's 300s upload / 600s chat setup.
-        async with NotebookLMClient.from_storage(
+        async with self._client_from_storage(
+            NotebookLMClient,
             timeout=self.UPLOAD_TIMEOUT_SECONDS,
             chat_timeout=self.CHAT_TIMEOUT_SECONDS,
         ) as client:
@@ -473,4 +499,4 @@ class NotebookLMPyProvider:
             await self._context.__aexit__(None, None, None)
         self._context = None; self.client = None
         if clear_auth:
-            await asyncio.to_thread(subprocess.run, [sys.executable, "-m", "notebooklm", "auth", "logout"], check=False, capture_output=True, text=True)
+            await asyncio.to_thread(subprocess.run, self._cli_command("auth", "logout"), check=False, capture_output=True, text=True)

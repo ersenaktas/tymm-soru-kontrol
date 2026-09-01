@@ -7,18 +7,12 @@ Bu sürüm, v0.6.38'in çalışan şablonlu Word/PDF rapor yapısını zorunlu G
 Canlı sunucu, ziyaretçinin bilgisayarında yeni Gmail sekmesi açamaz. `notebooklm login` komutu tarayıcıyı komutun çalıştığı makinede açtığı için yerelde çalışan giriş düğmesi Render konteynerinde kullanılamaz. Sunucu sürümü bunun yerine önceden oluşturulmuş tek bir NotebookLM oturumunu Render gizli ortam değişkeninden okur.
 
 1. Bu uygulama için kişisel hesabınız yerine ayrı ve yalnızca bu işe ayrılmış bir Google hesabı kullanın.
-2. Ekranı olan yerel bilgisayarda `notebooklm login` ile o hesaba giriş yapın. Oturum dosyası varsayılan olarak `%USERPROFILE%\.notebooklm\profiles\default\storage_state.json` konumuna yazılır.
-3. PowerShell'de aşağıdaki komutla JSON'u tek satır olarak panoya alın. Çıktıyı terminale yazdırmayın ve dosyayı Git'e eklemeyin:
-
-   ```powershell
-   $authPath = Join-Path $env:USERPROFILE ".notebooklm\profiles\default\storage_state.json"
-   (Get-Content -LiteralPath $authPath -Raw | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 100) | Set-Clipboard
-   ```
-
-4. Render Dashboard'da servis için **Environment** → **Add Environment Variable** seçin; anahtarı `NOTEBOOKLM_AUTH_JSON`, değeri panodaki JSON yapın. **Save, rebuild, and deploy** ile yeniden dağıtın. Mevcut bir Blueprint servisine sonradan eklenen `sync: false` alanı değeri otomatik istemediği için bu adım Dashboard'dan elle yapılmalıdır.
+2. Ekranı olan yerel bilgisayarda `notebooklm login` ile o hesaba giriş yapın. Oturum dosyası varsayılan olarak `%USERPROFILE%\.notebooklm\profiles\default\storage_state.json` konumuna yazılır. Bu kurulumda kullanılacak hazır dosya `outputs\storage_state.json` konumundadır.
+3. Render Dashboard'da servis için **Environment** → **Secret Files** → **Add Secret File** seçin. Dosya adını tam olarak `storage_state.json` yapın ve hazır JSON dosyasının içeriğini **Contents** alanına yapıştırın. Dosyayı Git'e, Docker imajına veya normal ortam değişkenine eklemeyin.
+4. `render.yaml`, uygulamayı `/etc/secrets/storage_state.json` yoluna bakacak şekilde ayarlar. **Save, rebuild, and deploy** ile yeniden dağıtın. Secret File mevcut servise Dashboard üzerinden elle eklenmelidir.
 5. Uygulamada **Bağlantıyı doğrula** düğmesine basın. Bu işlem yeni sekme açmaz; sunucudaki gizli oturumu test eder.
 
-Oturum süresi dolarsa yerelde tekrar `notebooklm login` çalıştırıp Render'daki aynı gizli değişkeni güncelleyin. `storage_state.json`, Google oturum çerezleri içerir ve parola gibi korunmalıdır. Bu uygulama şu anda tek sunucu hesabı kullanır; her ziyaretçinin kendi Gmail hesabıyla giriş yapacağı çok kullanıcılı OAuth akışı `notebooklm-py` tarafından sağlanmaz.
+Oturum süresi dolarsa yerelde tekrar `notebooklm login` çalıştırıp Render'daki aynı gizli dosyayı güncelleyin. `storage_state.json`, Google oturum çerezleri içerir ve parola gibi korunmalıdır. Alternatif olarak `NOTEBOOKLM_AUTH_JSON` gizli ortam değişkeni de desteklenmeye devam eder. Bu uygulama şu anda tek sunucu hesabı kullanır; her ziyaretçinin kendi Gmail hesabıyla giriş yapacağı çok kullanıcılı OAuth akışı `notebooklm-py` tarafından sağlanmaz.
 
 Render web servisi varsayılan olarak internete açıktır. Sunucu hesabının başkaları tarafından kullanılmasını ve yüklenen belgelerin yetkisiz işlenmesini önlemek için canlı adresi kurum erişim katmanı ya da uygulama düzeyi kimlik doğrulaması arkasına alın.
 
