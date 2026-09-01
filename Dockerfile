@@ -9,7 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-noto \
     fonts-freefont-ttf \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+
 
 WORKDIR /app
 

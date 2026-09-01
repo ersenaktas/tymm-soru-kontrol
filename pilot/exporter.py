@@ -586,6 +586,10 @@ def _register_pdf_fonts() -> tuple[str, str]:
     candidates = (
         (Path("C:/Windows/Fonts/arial.ttf"), Path("C:/Windows/Fonts/arialbd.ttf"), "ArialV7"),
         (Path("C:/Windows/Fonts/calibri.ttf"), Path("C:/Windows/Fonts/calibrib.ttf"), "CalibriV7"),
+        (Path("C:/Windows/Fonts/segoeui.ttf"), Path("C:/Windows/Fonts/segoeuib.ttf"), "SegoeUIV7"),
+        (Path("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"), Path("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"), "LiberationV7"),
+        (Path("/usr/share/fonts/truetype/freefont/FreeSans.ttf"), Path("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"), "FreeSansV7"),
+        (Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"), Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"), "NotoSansV7"),
         (Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"), Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"), "DejaVuV7"),
     )
     for regular_path, bold_path, family in candidates:
@@ -593,10 +597,26 @@ def _register_pdf_fonts() -> tuple[str, str]:
             try:
                 pdfmetrics.registerFont(TTFont(family, str(regular_path)))
                 pdfmetrics.registerFont(TTFont(f"{family}-Bold", str(bold_path)))
-            except KeyError:
+                return family, f"{family}-Bold"
+            except Exception:
                 pass
-            return family, f"{family}-Bold"
+
+    # Dynamic search in Linux font directories
+    font_root = Path("/usr/share/fonts")
+    if font_root.is_dir():
+        ttfs = list(font_root.rglob("*.ttf"))
+        reg = next((f for f in ttfs if "regular" in f.stem.lower() or "sans" in f.stem.lower()), None)
+        bold = next((f for f in ttfs if "bold" in f.stem.lower()), None)
+        if reg and bold:
+            try:
+                pdfmetrics.registerFont(TTFont("DynFontV7", str(reg)))
+                pdfmetrics.registerFont(TTFont("DynFontV7-Bold", str(bold)))
+                return "DynFontV7", "DynFontV7-Bold"
+            except Exception:
+                pass
+
     return "Helvetica", "Helvetica-Bold"
+
 
 
 def _pdf_text(value: str) -> str:

@@ -291,8 +291,13 @@ class NotebookLMPyProvider:
                 question_source_title = self._question_source_title(question_file, display_name)
                 self._progress(on_progress, "question_upload", f"Soru dosyası ekleniyor: {display_name}")
                 question_source = None
-                if question_file.suffix.lower() in {".md", ".txt"}:
-                    question_content = question_file.read_text(encoding="utf-8", errors="replace")
+                suffix = question_file.suffix.lower()
+
+                if suffix in {".docx", ".md", ".txt"}:
+                    # Fast & 100% reliable: extract text directly using python-docx / text reader
+                    question_content = self._extract_text_from_file(question_file)
+                    if not question_content:
+                        question_content = question_file.read_text(encoding="utf-8", errors="replace")
                     question_source = await self._retry(lambda: client.sources.add_text(
                         notebook.id,
                         question_source_title,
@@ -301,6 +306,7 @@ class NotebookLMPyProvider:
                         wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
                     ))
                 else:
+                    # For PDF files: upload native file, fallback to text extraction if Google processing fails
                     try:
                         question_source = await self._retry(lambda: client.sources.add_file(
                             notebook.id,
@@ -322,6 +328,7 @@ class NotebookLMPyProvider:
                             wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
                         ))
                 scoped_sources.append(question_source)
+
 
 
                 source_ids = [source.id for source in scoped_sources]
