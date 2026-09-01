@@ -1,0 +1,20 @@
+{
+  "input_dir": "",
+  "idle_shutdown_seconds": 300,
+  "rules_update": {
+    "rules_url": "",
+    "manifest_url": "",
+    "required": false,
+    "timeout_seconds": 45
+  },
+  "subject_sources": {
+    "biyoloji": "mdler/biyoloji.md",
+    "fizik": "mdler/fizik.md",
+    "kimya": "mdler/kimya.md",
+    "matematik": "mdler/matematik.md",
+    "cografya": "mdler/cografya.md",
+    "tarih": "mdler/tarih.md",
+    "felsefe": "mdler/felsefe.md",
+    "edebiyat": "mdler/edebiyat.md"
+  }
+}

@@ -1,0 +1,40 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment – rebuilt inside the container via pip install
+.venv/
+
+# Egg/build artifacts
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Runtime output and temp files – these are generated at runtime
+outputs/
+work/
+*.pid
+
+# Windows-only launcher scripts – not needed on Linux server
+*.bat
+*.ps1
+
+# Raw V7 markdown source – only the compiled rules.bin is shipped
+rules/soru_kontrol_V7.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db

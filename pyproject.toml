@@ -1,0 +1,27 @@
+[project]
+name = "notebooklm-soru-kontrol-local-pilot"
+version = "0.6.47"
+description = "Local V7 TYMM question review with robust Word/PDF export and institutional OGM branding"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "python-docx==1.2.0",
+  "pypdf==6.16.1",
+  "reportlab==5.0.0",
+  "pillow==12.3.0",
+  "legacy-cgi==2.6.4; python_version >= '3.13'",
+]
+
+[project.optional-dependencies]
+# Interactive Gmail/Chrome login only needs the browser extra.  The optional
+# cookies extra pulls rookiepy, which intentionally is not installed here:
+# it has no reliable Python 3.13+ Windows build and is unnecessary for the
+# normal interactive login flow.
+notebooklm = ["notebooklm-py[browser]==0.8.1"]
+web = ["flask==3.1.3"]
+test = ["pytest>=8.0,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools]
+packages = ["pilot"]

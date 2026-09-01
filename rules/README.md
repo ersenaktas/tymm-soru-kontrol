@@ -1,0 +1,1 @@
+`rules.bin` çalışma anında GitHub'daki bağlayıcı V7 dosyasından üretilen geçici çalışma paketidir. Öğretmen ZIP'inde bulunmaz. `delivery.bin`, V7'nin A/B/C/D sorun raporunu isteyen çalışma istemini açık metin yerine taşır. Açık metin yalnızca çalışma anında bellekte tutulur. İstemci anahtarıyla korunduğu için bu yapı obfuscation'dır; mutlak gizlilik değildir.

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: tymm-soru-kontrol
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: PILOT_HOST
+        value: 0.0.0.0
+      - key: PILOT_IDLE_TIMEOUT_SECONDS
+        value: "0"

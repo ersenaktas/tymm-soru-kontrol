@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Runtime outputs & sessions
+outputs/
+work/
+sessions/
+*.pid
+
+# Raw source rules
+rules/soru_kontrol_V7.md
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
