@@ -1,8 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Protocol
-import asyncio, hashlib, os, subprocess, sys, unicodedata
-
+import asyncio, hashlib, os, subprocess, sys
 
 from .review_contract import canonicalize_report_markdown, missing_detailed_sections, report_detail_score
 
@@ -47,34 +46,27 @@ class FakeNotebookProvider:
         self.logged_in = False; self.calls.append("disconnect")
 
 class NotebookLMPyProvider:
-    """Real adapter. Browser login is delegated to notebooklm-py's CLI.
-
-    When *notebooklm_home* is given every notebooklm CLI call runs with
-    ``NOTEBOOKLM_HOME`` set to that directory, which isolates each teacher's
-    Playwright browser profile and auth state from all other users.
-    """
+    """Real adapter. Browser login is delegated to notebooklm-py's CLI."""
     UPLOAD_TIMEOUT_SECONDS = 300.0
     CHAT_TIMEOUT_SECONDS = 600.0
     QUESTION_SOURCE_PREFIX = "[SoruKontrol]"
     MAX_DETAIL_RECOVERY_MODULES = 8
 
-    def __init__(self, notebooklm_home: Path | None = None):
+    def __init__(self):
         self.client = None; self._context = None
-        self._notebooklm_home = notebooklm_home
-
-    def _env(self) -> dict:
-        """Return os.environ patched with the per-user NOTEBOOKLM_HOME if set."""
-        env = os.environ.copy()
-        if self._notebooklm_home:
-            self._notebooklm_home.mkdir(parents=True, exist_ok=True)
-            env["NOTEBOOKLM_HOME"] = str(self._notebooklm_home)
-        return env
-
     async def login(self, browser: str = "chrome", force: bool = False) -> None:
+        # A deployed web server cannot open a browser window on the visitor's
+        # computer. In server mode authentication must be supplied out of band
+        # through NOTEBOOKLM_AUTH_JSON (for example as a Render secret).
+        server_mode = bool(
+            os.environ.get("PORT")
+            or os.environ.get("RENDER")
+            or os.environ.get("PILOT_SERVER_MODE") == "1"
+        )
         # A local cookie-file check alone can pass after NotebookLM has
         # invalidated the session server-side.  The passive token check is
         # read-only and catches that state before a review is started.
-        if not force:
+        if not force or server_mode:
             try:
                 local_check = await asyncio.to_thread(
                     subprocess.run,
@@ -85,7 +77,6 @@ class NotebookLMPyProvider:
                     encoding="utf-8",
                     errors="replace",
                     timeout=45,
-                    env=self._env(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 local_check = None
@@ -101,12 +92,23 @@ class NotebookLMPyProvider:
                         encoding="utf-8",
                         errors="replace",
                         timeout=45,
-                        env=self._env(),
                     )
                 except (OSError, subprocess.TimeoutExpired):
                     token_check = None
                 if token_check is not None and token_check.returncode == 0:
                     return
+
+        if server_mode:
+            if not os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip():
+                raise RuntimeError(
+                    "Sunucuda etkileşimli Gmail penceresi açılamaz. "
+                    "Render Environment bölümüne NOTEBOOKLM_AUTH_JSON gizli değişkenini ekleyin."
+                )
+            raise RuntimeError(
+                "Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. "
+                "Yerel bilgisayarda yeniden giriş yapıp Render'daki "
+                "NOTEBOOKLM_AUTH_JSON gizli değişkenini güncelleyin ve servisi yeniden dağıtın."
+            )
 
         if force:
             # Remove an expired NotebookLM session before interactive login.
@@ -122,7 +124,6 @@ class NotebookLMPyProvider:
                     encoding="utf-8",
                     errors="replace",
                     timeout=45,
-                    env=self._env(),
                 )
             except (OSError, subprocess.TimeoutExpired):
                 pass
@@ -140,25 +141,9 @@ class NotebookLMPyProvider:
                 encoding="utf-8",
                 errors="replace",
                 timeout=660,
-                env=self._env(),
             )
-            # Fallback: if 'chrome' channel fails due to missing binary, try 'chromium'
-            if completed.returncode != 0 and browser == "chrome" and "Chromium distribution 'chrome' is not found" in (completed.stderr or completed.stdout or ""):
-                alt_command = [sys.executable, "-m", "notebooklm", "login", "--browser", "chromium", "--browser-timeout", "600"]
-                completed = await asyncio.to_thread(
-                    subprocess.run,
-                    alt_command,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=660,
-                    env=self._env(),
-                )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Gmail girişi 10 dakika içinde tamamlanmadı. Tarayıcıdaki giriş penceresini tamamlayıp yeniden deneyin.") from exc
-
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             detail = self._redact_login_output(detail)
@@ -166,30 +151,6 @@ class NotebookLMPyProvider:
             raise RuntimeError("Gmail girişi başarısız oldu." + suffix)
         # Do not create the API client here: the web handler and the job engine
         # use different asyncio.run loops. The client is loop-affine.
-
-    def import_storage_state(self, raw_json: str | bytes) -> bool:
-        """Save a storage_state.json payload directly into this session's profile."""
-        import json as _json
-        if isinstance(raw_json, bytes):
-            raw_json = raw_json.decode("utf-8", errors="replace")
-        try:
-            data = _json.loads(raw_json)
-            if not isinstance(data, dict):
-                raise ValueError("JSON bir nesne (object) olmalıdır.")
-        except Exception as exc:
-            raise ValueError(f"Geçersiz JSON formatı: {exc}") from exc
-
-        # Save to notebooklm home profile directory
-        target_dir = (self._notebooklm_home or Path.home() / ".notebooklm") / "profiles" / "default"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_file = target_dir / "storage_state.json"
-        target_file.write_text(_json.dumps(data, indent=2), encoding="utf-8")
-
-        # Also save at root of notebooklm_home for legacy lookup
-        if self._notebooklm_home:
-            (self._notebooklm_home / "storage_state.json").write_text(_json.dumps(data, indent=2), encoding="utf-8")
-
-        return True
 
     @staticmethod
     def _redact_login_output(value: str) -> str:
@@ -200,35 +161,13 @@ class NotebookLMPyProvider:
         text = re.sub(r"(?i)[A-Za-z]:\\[^\r\n]*storage_state\.json", "NotebookLM oturum dosyası", text)
         return " ".join(text.split())
 
-    def _find_storage_file(self) -> Path | None:
-        """Find the active storage_state.json for this session or fallback to default."""
-        if self._notebooklm_home:
-            p1 = self._notebooklm_home / "profiles" / "default" / "storage_state.json"
-            if p1.is_file():
-                return p1
-            p2 = self._notebooklm_home / "storage_state.json"
-            if p2.is_file():
-                return p2
-        auth_root = Path(__file__).resolve().parents[1] / "auth" / "storage_state.json"
-        if auth_root.is_file():
-            return auth_root
-        user_default = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
-        if user_default.is_file():
-            return user_default
-        return None
-
     async def _open_client(self):
         try:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
             raise RuntimeError("notebooklm-py kurulu değil; pip install -e .[notebooklm]") from exc
-        kwargs = {"allow_headless": True}
-        storage_file = self._find_storage_file()
-        if storage_file:
-            kwargs["path"] = str(storage_file)
-        self._context = NotebookLMClient.from_storage(**kwargs)
+        self._context = NotebookLMClient.from_storage()
         self.client = await self._context.__aenter__()
-
 
     async def review(self, prompt: str, question_file: Path, subject: str, subject_file: Path | None = None, on_progress=None, *, question_title: str | None = None, delivery_instruction: str | None = None, report_mode: str = "full") -> str:
         try:
@@ -242,20 +181,12 @@ class NotebookLMPyProvider:
 
         # The client is created and closed inside the same asyncio loop as the job.
         # Timeouts match the established project's 300s upload / 600s chat setup.
-        client_kwargs: dict = {
-            "timeout": self.UPLOAD_TIMEOUT_SECONDS,
-            "chat_timeout": self.CHAT_TIMEOUT_SECONDS,
-            "allow_headless": True,
-        }
-        storage_file = self._find_storage_file()
-        if storage_file:
-            client_kwargs["path"] = str(storage_file)
-        async with NotebookLMClient.from_storage(**client_kwargs) as client:
-
+        async with NotebookLMClient.from_storage(
+            timeout=self.UPLOAD_TIMEOUT_SECONDS,
+            chat_timeout=self.CHAT_TIMEOUT_SECONDS,
+        ) as client:
             notebook = None
             try:
-
-
                 self._progress(on_progress, "notebook_create", "Geçici NotebookLM defteri oluşturuluyor")
                 notebook = await self._retry(lambda: client.notebooks.create(f"Soru kontrol {question_file.stem}"))
                 self._progress(on_progress, "rules_upload", "Kontrol yönergesi güvenli olarak ekleniyor")
@@ -267,70 +198,25 @@ class NotebookLMPyProvider:
                     wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
                 ))
                 scoped_sources = [rule_source]
-                subject_source_title = unicodedata.normalize("NFC", subject_file.name)
+                subject_source_title = subject_file.name
                 self._progress(on_progress, "subject_upload", f"Ders kaynağı ekleniyor: {subject_source_title}")
-                if subject_file.suffix.lower() in {".md", ".txt"}:
-                    subject_content = subject_file.read_text(encoding="utf-8", errors="replace")
-                    scoped_sources.append(await self._retry(lambda: client.sources.add_text(
-                        notebook.id,
-                        subject_source_title,
-                        subject_content,
-                        wait=True,
-                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    )))
-                else:
-                    scoped_sources.append(await self._retry(lambda: client.sources.add_file(
-                        notebook.id,
-                        subject_file,
-                        wait=True,
-                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                        title=subject_source_title,
-                    )))
-
-                display_name = unicodedata.normalize("NFC", question_title or question_file.name)
+                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                    notebook.id,
+                    subject_file,
+                    wait=True,
+                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                    title=subject_source_title,
+                )))
+                display_name = question_title or question_file.name
                 question_source_title = self._question_source_title(question_file, display_name)
                 self._progress(on_progress, "question_upload", f"Soru dosyası ekleniyor: {display_name}")
-                question_source = None
-                suffix = question_file.suffix.lower()
-
-                if suffix in {".docx", ".md", ".txt"}:
-                    # Fast & 100% reliable: extract text directly using python-docx / text reader
-                    question_content = self._extract_text_from_file(question_file)
-                    if not question_content:
-                        question_content = question_file.read_text(encoding="utf-8", errors="replace")
-                    question_source = await self._retry(lambda: client.sources.add_text(
-                        notebook.id,
-                        question_source_title,
-                        question_content,
-                        wait=True,
-                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    ))
-                else:
-                    # For PDF files: upload native file, fallback to text extraction if Google processing fails
-                    try:
-                        question_source = await self._retry(lambda: client.sources.add_file(
-                            notebook.id,
-                            question_file,
-                            wait=True,
-                            wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                            title=question_source_title,
-                        ))
-                    except Exception as upload_exc:
-                        self._progress(on_progress, "question_upload", f"Soru metni doğrudan ayrıştırılarak aktarılıyor: {display_name}")
-                        extracted_content = self._extract_text_from_file(question_file)
-                        if not extracted_content:
-                            raise upload_exc
-                        question_source = await self._retry(lambda: client.sources.add_text(
-                            notebook.id,
-                            question_source_title,
-                            extracted_content,
-                            wait=True,
-                            wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                        ))
-                scoped_sources.append(question_source)
-
-
-
+                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                    notebook.id,
+                    question_file,
+                    wait=True,
+                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                    title=question_source_title,
+                )))
                 source_ids = [source.id for source in scoped_sources]
                 await self._enable_detailed_mode(client, notebook.id, on_progress)
                 # V7 performs the full internal review but reports only
@@ -582,47 +468,9 @@ class NotebookLMPyProvider:
                 await asyncio.sleep(delays[min(attempt - 1, len(delays) - 1)])
         raise last_error  # pragma: no cover
 
-    @staticmethod
-    def _extract_text_from_file(file_path: Path) -> str:
-        """Extract structured text from DOCX, PDF, MD, or TXT locally."""
-        suffix = file_path.suffix.lower()
-        if suffix in {".md", ".txt"}:
-            return file_path.read_text(encoding="utf-8", errors="replace")
-        if suffix == ".docx":
-            try:
-                import docx
-                doc = docx.Document(file_path)
-                parts = []
-                for p in doc.paragraphs:
-                    t = p.text.strip()
-                    if t:
-                        parts.append(t)
-                for table in doc.tables:
-                    for row in table.rows:
-                        row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
-                        if row_cells:
-                            parts.append(" | ".join(row_cells))
-                return "\n\n".join(parts)
-            except Exception:
-                return ""
-        if suffix == ".pdf":
-            try:
-                import pypdf
-                reader = pypdf.PdfReader(str(file_path))
-                parts = []
-                for page in reader.pages:
-                    t = page.extract_text()
-                    if t and t.strip():
-                        parts.append(t.strip())
-                return "\n\n".join(parts)
-            except Exception:
-                return ""
-        return ""
-
     async def disconnect(self, clear_auth: bool = False) -> None:
         if self._context is not None:
             await self._context.__aexit__(None, None, None)
         self._context = None; self.client = None
         if clear_auth:
             await asyncio.to_thread(subprocess.run, [sys.executable, "-m", "notebooklm", "auth", "logout"], check=False, capture_output=True, text=True)
-

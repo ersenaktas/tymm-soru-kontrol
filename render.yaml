@@ -9,3 +9,5 @@ services:
         value: 0.0.0.0
       - key: PILOT_IDLE_TIMEOUT_SECONDS
         value: "0"
+      - key: NOTEBOOKLM_AUTH_JSON
+        sync: false

@@ -22,19 +22,19 @@ from .engine import ReviewEngine
 from .models import ReviewJob
 from .provider import FakeNotebookProvider, NotebookLMPyProvider
 from .subjects import SUBJECT_LABELS, cleanup_subject_source, discover_question_files, resolve_subject
-from . import sessions as _sessions_mod
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.json"
 SERVER_PID_PATH = ROOT / "work" / "server.pid"
 BRAND_LOGO_PATH = ROOT / "assets" / "OGM_logo_beyaz_yatay.png"
-PILOT_BUILD = "0.6.47-multiuser"
+PILOT_BUILD = "0.6.47-larger-header-logo"
 FAKE_MODE = os.environ.get("PILOT_FAKE") == "1"
-# Legacy single-user globals kept for local / FAKE_MODE compatibility
-_global_provider = FakeNotebookProvider() if FAKE_MODE else None
-_global_connected = FAKE_MODE
-# Per-session jobs are stored inside each _sessions_mod._Session object.
-# The legacy global jobs dict below is only used in FAKE_MODE / local mode.
+SERVER_MODE = bool(os.environ.get("PORT") or os.environ.get("RENDER") or os.environ.get("PILOT_SERVER_MODE") == "1")
+SERVER_AUTH_CONFIGURED = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip())
+provider = FakeNotebookProvider() if FAKE_MODE else NotebookLMPyProvider()
+if FAKE_MODE:
+    provider.logged_in = True
+connected = FAKE_MODE
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 activity_lock = threading.Lock()
@@ -45,7 +45,6 @@ MIME_TYPES = {
     "md": "text/markdown; charset=utf-8",
     "json": "application/json; charset=utf-8",
 }
-
 
 PAGE_STYLE = """
 <style>
@@ -402,7 +401,7 @@ PAGE_SCRIPT = """
     const folderButton = document.getElementById('folder-go');
     const openFolder = () => {
       const value = folderInput?.value.trim();
-      if (value) window.location.href = window.location.pathname.split('?')[0] + '?folder=' + encodeURIComponent(value);
+      if (value) window.location.href = '/?folder=' + encodeURIComponent(value);
     };
     folderButton?.addEventListener('click', openFolder);
     folderInput?.addEventListener('keydown', event => {
@@ -484,13 +483,13 @@ def idle_shutdown_seconds() -> int:
     raw = os.environ.get("PILOT_IDLE_TIMEOUT_SECONDS", "")
     if not raw:
         try:
-            raw = str(load_config().get("idle_shutdown_seconds", 0))
+            raw = str(load_config().get("idle_shutdown_seconds", 300))
         except Exception:
-            raw = "0"
+            raw = "300"
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = 0
+        value = 300
     if value <= 0:
         return 0
     return min(3600, max(30, value))
@@ -512,7 +511,7 @@ def idle_watchdog(server: ThreadingHTTPServer, timeout_seconds: int) -> None:
     if timeout_seconds <= 0:
         return
     while True:
-        time.sleep(10)
+        time.sleep(5)
         with activity_lock:
             idle_for = time.monotonic() - last_browser_activity
         if idle_for < timeout_seconds or has_active_jobs():
@@ -520,7 +519,6 @@ def idle_watchdog(server: ThreadingHTTPServer, timeout_seconds: int) -> None:
         print(f"Tarayici baglantisi {timeout_seconds} saniyedir yok; yerel sunucu kapatiliyor.", flush=True)
         server.shutdown()
         return
-
 
 
 def safe_error(value: str | None) -> str:
@@ -564,101 +562,13 @@ def stage_pasted_question(text: str, title: str, upload_root: Path) -> Path | No
 
 
 class Handler(BaseHTTPRequestHandler):
-    # ------------------------------------------------------------------
-    # Session helpers
-    # ------------------------------------------------------------------
-    def _session_id_from_cookie(self) -> str | None:
-        """Parse pilot_session cookie value from the Cookie header."""
-        cookie_header = self.headers.get("Cookie", "")
-        for part in cookie_header.split(";"):
-            part = part.strip()
-            if part.startswith(f"{_sessions_mod.COOKIE_NAME}="):
-                return part[len(_sessions_mod.COOKIE_NAME) + 1:]
-        return None
-
-    def _get_session(self) -> "_sessions_mod._Session":
-        """Return the current user's session, creating one if needed."""
-        sid = self._session_id_from_cookie()
-        return _sessions_mod.get_or_create(sid, ROOT)
-
-    def _set_session_cookie(self, session: "_sessions_mod._Session") -> None:
-        """Emit a Set-Cookie header that binds this response to the session."""
-        self.send_header(
-            "Set-Cookie",
-            f"{_sessions_mod.COOKIE_NAME}={session.session_id}; "
-            "Path=/; HttpOnly; SameSite=Lax",
-        )
-
-    def _session_provider(self, session: "_sessions_mod._Session"):
-        """Return the correct provider for a session (Fake or real per-user)."""
-        if FAKE_MODE:
-            return _global_provider
-        return NotebookLMPyProvider(notebooklm_home=session.notebooklm_home)
-
-    def _session_jobs(self, session: "_sessions_mod._Session") -> dict[str, dict]:
-        return session.jobs
-
-    def _session_jobs_lock(self, session: "_sessions_mod._Session") -> threading.Lock:
-        return session.jobs_lock
-
-    def _session_output_dir(self, session: "_sessions_mod._Session") -> Path:
-        return session.outputs_dir
-
-    def _session_upload_dir(self, session: "_sessions_mod._Session") -> Path:
-        return session.uploads_dir
-
-    # ------------------------------------------------------------------
-    # Reverse Proxy / URL Prefix helpers
-    # ------------------------------------------------------------------
-    def _prefix(self) -> str:
-        """Return the URL prefix (e.g. '/soru-inceleme') if deployed behind a reverse proxy."""
-        # 1. Header from Reverse Proxy (IIS / Nginx)
-        fwd_prefix = self.headers.get("X-Forwarded-Prefix", "").strip().rstrip("/")
-        if fwd_prefix:
-            return fwd_prefix
-        # 2. Environment variable
-        env_prefix = os.environ.get("PILOT_PREFIX") or os.environ.get("URL_PREFIX", "")
-        env_prefix = env_prefix.strip().rstrip("/")
-        if env_prefix:
-            return env_prefix if env_prefix.startswith("/") else f"/{env_prefix}"
-        # 3. Path sniffing (if reverse proxy forwards the path without stripping)
-        raw_path = self.path.split("?")[0]
-        for candidate in ("/soru-inceleme", "/soru-kontrol", "/sorukontrol", "/soruinceleme"):
-            if raw_path == candidate or raw_path.startswith(candidate + "/"):
-                return candidate
-        return ""
-
-    def _url(self, path: str = "") -> str:
-        """Generate a prefix-aware relative or absolute URL."""
-        prefix = self._prefix()
-        if not path or path == "/":
-            return f"{prefix}/" if prefix else "/"
-        if not path.startswith("/"):
-            path = f"/{path}"
-        return f"{prefix}{path}"
-
-    def _clean_path(self, raw_path: str) -> str:
-        """Strip the URL prefix from the incoming request path."""
-        prefix = self._prefix()
-        if prefix and (raw_path == prefix or raw_path.startswith(prefix + "/")):
-            cleaned = raw_path[len(prefix):]
-            return cleaned if cleaned.startswith("/") else f"/{cleaned}"
-        return raw_path
-
-    # ------------------------------------------------------------------
-    # Response helpers
-    # ------------------------------------------------------------------
-    def _page(self, body: str, title: str = "Bağlam Temelli Çoktan Seçmeli Soru Kontrol Modülü", *, session: "_sessions_mod._Session | None" = None) -> None:
+    def _page(self, body: str, title: str = "Bağlam Temelli Çoktan Seçmeli Soru Kontrol Modülü") -> None:
         update_label = html.escape(rules_update_label())
-        logo_url = self._url("/assets/ogm-logo.png")
-        home_url = self._url("/")
-        content = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><meta name='theme-color' content='#215e99'><title>{html.escape(title)}</title>{PAGE_STYLE}{PAGE_SCRIPT}</head><body><header class='institution-header'><div class='institution-inner'><div class='brand'><a href='{home_url}' style='text-decoration:none;display:flex;align-items:center;gap:18px'><img class='brand-logo' src='{logo_url}' alt='Ortaöğretim Genel Müdürlüğü'><div class='brand-copy'><span class='brand-kicker'>Türkiye Yüzyılı Maarif Modeli</span><h1>Bağlam Temelli Çoktan Seçmeli Soru Kontrol Modülü</h1><p>Öğretim Materyalleri ve İçerik Geliştirme Daire Başkanlığı</p></div></a></div><span class='header-badge'>{update_label}</span></div></header><div class='app-shell'><main>{body}</main><footer class='app-footer'>Öğretim Materyalleri ve İçerik Geliştirme Daire Başkanlığı</footer></div></body></html>"""
+        content = f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'><meta name='theme-color' content='#215e99'><title>{html.escape(title)}</title>{PAGE_STYLE}{PAGE_SCRIPT}</head><body><header class='institution-header'><div class='institution-inner'><div class='brand'><img class='brand-logo' src='/assets/ogm-logo.png' alt='Ortaöğretim Genel Müdürlüğü'><div class='brand-copy'><span class='brand-kicker'>Türkiye Yüzyılı Maarif Modeli</span><h1>Bağlam Temelli Çoktan Seçmeli Soru Kontrol Modülü</h1><p>Öğretim Materyalleri ve İçerik Geliştirme Daire Başkanlığı</p></div></div><span class='header-badge'>{update_label}</span></div></header><div class='app-shell'><main>{body}</main><footer class='app-footer'>Öğretim Materyalleri ve İçerik Geliştirme Daire Başkanlığı · Tarayıcı kapatıldığında uygulama kullanılmadığı süre sonunda otomatik kapanır.</footer></div></body></html>"""
         data = content.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        if session:
-            self._set_session_cookie(session)
         self.end_headers()
         self.wfile.write(data)
 
@@ -671,39 +581,29 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _redirect(self, target: str, *, session: "_sessions_mod._Session | None" = None) -> None:
+    def _redirect(self, target: str) -> None:
         self.send_response(303)
-        # Apply prefix to redirect target if relative
-        final_target = target if target.startswith(("http://", "https://")) else self._url(target)
-        self.send_header("Location", final_target)
+        self.send_header("Location", target)
         self.send_header("Content-Length", "0")
-        if session:
-            self._set_session_cookie(session)
         self.end_headers()
-
-
 
     def do_GET(self) -> None:
         touch_browser_activity()
-        sess = self._get_session()
         parsed = urlparse(self.path)
-        path = self._clean_path(parsed.path)
         query = parse_qs(parsed.query)
-        if path == "/heartbeat":
+        if parsed.path == "/heartbeat":
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", "0")
-            self._set_session_cookie(sess)
             self.end_headers()
             return
-        if path == "/assets/ogm-logo.png": return self._brand_logo()
-        if path == "/status": return self._status_page(query.get("job", [""])[0], session=sess)
-        if path == "/status-fragment": return self._status_page(query.get("job", [""])[0], fragment=True, session=sess)
-        if path == "/download": return self._download(query.get("name", [""])[0], session=sess)
-        if path == "/bundle": return self._bundle(query.get("job", [""])[0], query.get("kind", [""])[0], session=sess)
-        if path == "/preview": return self._preview(query.get("job", [""])[0], query.get("index", [""])[0], session=sess)
-        self._home(query.get("folder", [""])[0], session=sess)
-
+        if parsed.path == "/assets/ogm-logo.png": return self._brand_logo()
+        if parsed.path == "/status": return self._status_page(query.get("job", [""])[0])
+        if parsed.path == "/status-fragment": return self._status_page(query.get("job", [""])[0], fragment=True)
+        if parsed.path == "/download": return self._download(query.get("name", [""])[0])
+        if parsed.path == "/bundle": return self._bundle(query.get("job", [""])[0], query.get("kind", [""])[0])
+        if parsed.path == "/preview": return self._preview(query.get("job", [""])[0], query.get("index", [""])[0])
+        self._home(query.get("folder", [""])[0])
 
     def _brand_logo(self) -> None:
         if not BRAND_LOGO_PATH.is_file():
@@ -717,8 +617,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _home(self, folder_value: str, *, session: "_sessions_mod._Session") -> None:
-        connected = session.connected
+    def _home(self, folder_value: str) -> None:
         config = load_config()
         folder = folder_value or str(config.get("input_dir", ""))
         files: list[Path] = []
@@ -726,38 +625,25 @@ class Handler(BaseHTTPRequestHandler):
         if folder:
             try: files = discover_question_files(Path(folder))
             except Exception as exc: folder_error = safe_error(str(exc))
-
         checkboxes = "".join(f"<label><input type='checkbox' name='selected_paths' value='{html.escape(str(path), quote=True)}'><span>{html.escape(path.name)}</span></label>" for path in files) or "<p class='help'>Henüz klasör taranmadı veya uygun dosya bulunamadı.</p>"
         subject_options = "<option value='auto'>Otomatik (dosya adı + içerik)</option>" + "".join(f"<option value='{key}'>{label}</option>" for key, label in SUBJECT_LABELS.items())
-        post_url = self._url("")
         if connected:
-            connection = "<span class='status-pill ready'><span class='status-dot'></span>Soru Kontrol Motoru Hazır</span><p>Soru dosyanızı yükleyerek hemen değerlendirmeye başlayabilirsiniz.</p>"
-            connection_actions = f"<form method='post' action='{post_url}'><button class='secondary' name='action' value='disconnect' title='Gerekirse oturumu sıfırlayın'>Oturumu Sıfırla</button></form>"
+            label = "Sunucu NotebookLM bağlantısı hazır" if SERVER_MODE else "Gmail bağlantısı hazır"
+            connection = f"<span class='status-pill ready'><span class='status-dot'></span>{label}</span><p>Dosyanızı seçerek değerlendirmeye başlayabilirsiniz.</p>"
+            connection_actions = "" if SERVER_MODE else "<form method='post'><button class='secondary' name='action' value='disconnect'>Bağlantıyı kaldır</button></form>"
             review_hint = "Dosyanız sıraya alınarak rapor hazırlanır."
-
+        elif SERVER_MODE and SERVER_AUTH_CONFIGURED:
+            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Sunucu oturumu doğrulanmalı</span><p>Render'a eklenen NotebookLM kimliğini doğrulayın; yeni Gmail sekmesi açılmaz.</p>"
+            connection_actions = "<form method='post'><button name='action' value='connect'>Bağlantıyı doğrula</button></form>"
+            review_hint = "Önce üst bölümden sunucu bağlantısını doğrulayın."
+        elif SERVER_MODE:
+            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Sunucu kimliği eksik</span><p>Render Environment bölümüne NOTEBOOKLM_AUTH_JSON gizli değişkenini ekleyin.</p>"
+            connection_actions = "<form method='post'><button name='action' value='connect'>Yapılandırmayı kontrol et</button></form>"
+            review_hint = "Önce Render'da sunucu kimliğini yapılandırın."
         else:
-            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Giriş gerekli</span><p>Değerlendirme başlatmak için Gmail hesabınızı bağlayın veya oturum dosyanızı yükleyin.</p>"
-            connection_actions = f"""
-            <form method='post' action='{post_url}'><button name='action' value='connect'>Gmail ile otomatik bağlan</button></form>
-            <details class='auth-manual-details' style='margin-top:10px;'>
-              <summary style='cursor:pointer;color:#215e99;font-weight:600;font-size:0.9rem;'>📁 Oturum Dosyası (.json) Yükle veya Yapıştır</summary>
-              <div style='background:#f8fafc;padding:12px;border-radius:6px;margin-top:8px;border:1px solid #e2e8f0;'>
-                <p class='help' style='margin:0 0 8px 0;font-size:0.82rem;'>Sunucuda doğrudan bağlanmak için <code>storage_state.json</code> dosyanızı seçin:</p>
-                <form method='post' action='{post_url}' enctype='multipart/form-data' style='display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;'>
-                  <input type='file' name='session_file' accept='.json' required style='font-size:0.85rem;'>
-                  <button name='action' value='upload_session' style='padding:6px 12px;font-size:0.85rem;'>Yükle ve Bağlan</button>
-                </form>
-                <form method='post' action='{post_url}'>
-                  <textarea name='session_json' rows='2' placeholder='Veya JSON içeriğini buraya yapıştırın...' style='width:100%;font-size:0.8rem;padding:6px;border-radius:4px;border:1px solid #cbd5e1;box-sizing:border-box;'></textarea>
-                  <button name='action' value='paste_session' class='secondary' style='margin-top:4px;padding:4px 10px;font-size:0.8rem;'>Metni Kaydet</button>
-                </form>
-              </div>
-            </details>
-            """
-            review_hint = "Önce üst bölümden Gmail ile giriş yapın veya oturum yükleyin."
-
-
-
+            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Giriş gerekli</span><p>Değerlendirme başlatmak için Gmail hesabınızı bağlayın.</p>"
+            connection_actions = "<form method='post'><button name='action' value='connect'>Gmail ile giriş yap</button></form>"
+            review_hint = "Önce üst bölümden Gmail ile giriş yapın."
         folder_error_html = f"<p class='error'>{html.escape(folder_error)}</p>" if folder_error else ""
         advanced_open = " open" if folder or folder_error else ""
         body = f"""
@@ -765,10 +651,9 @@ class Handler(BaseHTTPRequestHandler):
           <div class='connection-main'><div>{connection}</div></div>
           <div class='connection-actions'>{connection_actions}</div>
         </section>
-        <form id='review-form' method='post' action='{post_url}' enctype='multipart/form-data'>
+        <form id='review-form' method='post' enctype='multipart/form-data'>
           <div class='workspace'>
             <section class='card primary-card'>
-
               <p class='eyebrow'>Yeni değerlendirme</p>
               <h2>1. Soru dosyanızı yükleyin</h2>
               <p class='intro'>PDF veya Word dosyanızı seçin. Tek dosyalık günlük kullanım için bu alan yeterlidir.</p>
@@ -845,20 +730,17 @@ class Handler(BaseHTTPRequestHandler):
             </aside>
           </div>
         </form>"""
-        self._page(body, session=session)
+        self._page(body)
 
-    def _status_page(self, job_id: str, fragment: bool = False, *, session: "_sessions_mod._Session") -> None:
-        sess_jobs = self._session_jobs(session)
-        sess_lock = self._session_jobs_lock(session)
-        with sess_lock:
-            state = sess_jobs.get(job_id)
+    def _status_page(self, job_id: str, fragment: bool = False) -> None:
+        with jobs_lock:
+            state = jobs.get(job_id)
             state = dict(state) if state else None
         if not state:
             content = "<div id='status-content'><div class='card'><p>İş bulunamadı.</p><a href='/'>Geri</a></div></div>"
-            return self._fragment(content) if fragment else self._page(content, session=session)
+            return self._fragment(content) if fragment else self._page(content)
         view = progress_snapshot(state)
         step_rows = []
-
         status_symbols = {"done": "✓", "active": "•", "skipped": "–"}
         status_labels = {"done": "Tamamlandı", "active": "Devam ediyor", "skipped": "Çalıştırılmadı", "pending": "Bekliyor"}
         for number, item in enumerate(state.get("steps", []), 1):
@@ -907,16 +789,13 @@ class Handler(BaseHTTPRequestHandler):
             body += f"<div class='result-banner {'ok' if complete else 'warn'}'>{'Tüm raporlar hazır.' if complete else 'İş tamamlandı; bazı dosyalarda hata oluştu.'}</div>"
             ok_results = [item for item in state["results"] if not item.get("error")]
             if len(ok_results) > 1:
-                bundle_pdf = self._url(f"/bundle?job={quote(job_id)}&kind=pdf")
-                bundle_docx = self._url(f"/bundle?job={quote(job_id)}&kind=docx")
                 body += (
                     "<nav class='actions' aria-label='Toplu rapor indirme'>"
-                    f"<a class='button' href='{bundle_pdf}'>PDF raporlarını ZIP indir</a>"
-                    f"<a class='button secondary' href='{bundle_docx}'>Word raporlarını ZIP indir</a>"
+                    f"<a class='button' href='/bundle?job={quote(job_id)}&kind=pdf'>PDF raporlarını ZIP indir</a>"
+                    f"<a class='button secondary' href='/bundle?job={quote(job_id)}&kind=docx'>Word raporlarını ZIP indir</a>"
                     "</nav>"
                 )
             if len(batch_queue) <= 1:
-                post_action_url = self._url("")
                 for index, item in enumerate(state["results"]):
                     cache_note = " • doğrulanmış önbellekten" if item.get("cached") else ""
                     mode_note = " • V7 sorun raporu"
@@ -924,21 +803,22 @@ class Handler(BaseHTTPRequestHandler):
                     if item.get("error"):
                         body += f"<span class='error'>Hata: {html.escape(item['error'])}</span>"
                         if item.get("raw"):
-                            raw_url = self._url(f"/download?name={quote(Path(item['raw']).name)}")
+                            raw_url = f"/download?name={quote(Path(item['raw']).name)}"
                             body += f"<p><a class='button secondary' href='{raw_url}'>Korunan NotebookLM yanıtını indir</a></p>"
                         if is_auth_error(item["error"]):
-                            body += f"<p class='warn'>NotebookLM Gmail oturumu geçersiz veya süresi dolmuş. Aşağıdaki düğmeyle yeniden giriş yapın.</p><form method='post' action='{post_action_url}'><button name='action' value='reconnect'>Gmail girişini yenile</button></form>"
+                            if SERVER_MODE:
+                                body += "<p class='warn'>Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. Render'daki NOTEBOOKLM_AUTH_JSON gizli değişkenini güncelledikten sonra yeniden denetleyin.</p><form method='post'><button name='action' value='reconnect'>Sunucu bağlantısını denetle</button></form>"
+                            else:
+                                body += "<p class='warn'>NotebookLM Gmail oturumu geçersiz veya süresi dolmuş. Aşağıdaki düğmeyle yeniden giriş yapın.</p><form method='post'><button name='action' value='reconnect'>Gmail girişini yenile</button></form>"
                     else:
                         body += self._report_actions(job_id, index, item)
                     body += "</div>"
-        frag_url = self._url(f"/status-fragment?job={quote(job_id)}")
-        live_attribute = f" data-status-url='{frag_url}'" if state["status"] in {"queued", "running"} else ""
-        new_rev_url = self._url("/")
+        live_attribute = f" data-status-url='/status-fragment?job={quote(job_id)}'" if state["status"] in {"queued", "running"} else ""
         content = (
             f"<div id='status-content' data-status-revision='{status_revision(state)}'{live_attribute}>"
-            f"{body}<nav class='status-page-actions'><a class='button ghost' href='{new_rev_url}'>Yeni değerlendirme başlat</a></nav></div>"
+            f"{body}<nav class='status-page-actions'><a class='button ghost' href='/'>Yeni değerlendirme başlat</a></nav></div>"
         )
-        return self._fragment(content) if fragment else self._page(content, session=session)
+        return self._fragment(content) if fragment else self._page(content)
 
     def _batch_queue(self, job_id: str, state: dict, view: dict) -> str:
         queue = state.get("queue") or []
@@ -950,7 +830,6 @@ class Handler(BaseHTTPRequestHandler):
         status_labels = {"pending": "Sırada", "running": "İşleniyor", "completed": "Rapor hazır", "error": "Hata"}
         rows = []
         is_finished = state.get("status") not in {"queued", "running"}
-        post_action_url = self._url("")
         for index, item in enumerate(queue):
             status = item.get("status", "pending")
             if status == "running":
@@ -974,15 +853,15 @@ class Handler(BaseHTTPRequestHandler):
             if status == "error" and item.get("error"):
                 row += f"<p class='queue-error'>Hata: {html.escape(str(item['error']))}</p>"
                 if item.get("raw"):
-                    raw_url = self._url(f"/download?name={quote(Path(str(item['raw'])).name)}")
+                    raw_url = f"/download?name={quote(Path(str(item['raw'])).name)}"
                     row += f"<p><a class='button secondary' href='{raw_url}'>Korunan NotebookLM yanıtını indir</a></p>"
             row += "</div>"
             if status == "completed" and item.get("pdf") and item.get("docx"):
                 row += self._report_actions(job_id, index, item, new_tab=True)
             elif status == "error" and is_finished and is_auth_error(str(item.get("error") or "")):
-                row += f"<form class='queue-error-action' method='post' action='{post_action_url}'><button name='action' value='reconnect'>Gmail girişini yenile</button></form>"
+                reconnect_label = "Sunucu bağlantısını denetle" if SERVER_MODE else "Gmail girişini yenile"
+                row += f"<form class='queue-error-action' method='post'><button name='action' value='reconnect'>{reconnect_label}</button></form>"
             rows.append(row + "</li>")
-
         return (
             "<section class='card batch-queue'><header class='queue-header'><div>"
             "<h3>Dosya kuyruğu</h3><p>Biten raporu seri tamamlanmadan görüntüleyebilir veya indirebilirsiniz.</p>"
@@ -991,9 +870,9 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _report_actions(self, job_id: str, index: int, item: dict, new_tab: bool = False) -> str:
-        preview_url = self._url(f"/preview?job={quote(job_id)}&index={index}")
-        pdf_url = self._url(f"/download?name={quote(Path(item['pdf']).name)}")
-        docx_url = self._url(f"/download?name={quote(Path(item['docx']).name)}")
+        preview_url = f"/preview?job={quote(job_id)}&index={index}"
+        pdf_url = f"/download?name={quote(Path(item['pdf']).name)}"
+        docx_url = f"/download?name={quote(Path(item['docx']).name)}"
         preview_target = " target='_blank' rel='noopener'" if new_tab else ""
         return (
             "<nav class='report-actions' aria-label='Rapor işlemleri'>"
@@ -1003,20 +882,15 @@ class Handler(BaseHTTPRequestHandler):
             "</nav>"
         )
 
-    def _preview(self, job_id: str, index_value: str, *, session: "_sessions_mod._Session") -> None:
-        sess_jobs = self._session_jobs(session)
-        sess_lock = self._session_jobs_lock(session)
+    def _preview(self, job_id: str, index_value: str) -> None:
         try:
             index = int(index_value)
-            with sess_lock:
-                item = sess_jobs[job_id]["results"][index]
+            with jobs_lock: item = jobs[job_id]["results"][index]
             content = Path(item["md"]).read_text(encoding="utf-8")
-        except Exception:
-            return self._page("<div class='card'><p>Rapor önizlemesi bulunamadı.</p></div>", session=session)
-        status_url = self._url(f"/status?job={quote(job_id)}")
-        pdf_url = self._url(f"/download?name={quote(Path(item['pdf']).name)}")
-        docx_url = self._url(f"/download?name={quote(Path(item['docx']).name)}")
-        new_url = self._url("/")
+        except Exception: return self._page("<div class='card'><p>Rapor önizlemesi bulunamadı.</p></div>")
+        status_url = f"/status?job={quote(job_id)}"
+        pdf_url = f"/download?name={quote(Path(item['pdf']).name)}"
+        docx_url = f"/download?name={quote(Path(item['docx']).name)}"
         subject = html.escape(str(item.get("subject") or "Belirlenmedi"))
         name = html.escape(str(item.get("name") or "Rapor"))
         body = (
@@ -1025,66 +899,39 @@ class Handler(BaseHTTPRequestHandler):
             "<div class='preview-actions'>"
             f"<a class='button' href='{pdf_url}'>PDF indir</a>"
             f"<a class='button secondary' href='{docx_url}'>Word indir</a>"
-            f"<a class='button ghost' href='{new_url}'>Yeni değerlendirme</a>"
+            "<a class='button ghost' href='/'>Yeni değerlendirme</a>"
             "</div></nav>"
             "<section class='card preview-card'>"
             "<header class='preview-heading'><p class='eyebrow'>Rapor önizleme</p>"
-
             f"<h2>{name}</h2><p class='help'>Ders: {subject}</p></header>"
             f"<div class='report' role='document'>{html.escape(content)}</div>"
             "</section>"
         )
-        self._page(body, title=f"Rapor önizleme - {item.get('name') or 'Rapor'}", session=session)
+        self._page(body, title=f"Rapor önizleme - {item.get('name') or 'Rapor'}")
 
-    def _download(self, name: str, *, session: "_sessions_mod._Session") -> None:
-        # Serve only from this user's outputs directory for isolation
-        safe_name = os.path.basename(name)
-        target = (session.outputs_dir / safe_name).resolve()
-        if not target.parent == session.outputs_dir.resolve() or not target.is_file():
-            return self._page("<div class='card'><p>Dosya bulunamadı.</p></div>", session=session)
-        data = target.read_bytes()
-        suffix = target.suffix.lower().lstrip(".")
-        self.send_response(200)
-        self.send_header("Content-Type", MIME_TYPES.get(suffix, "application/octet-stream"))
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(target.name)}")
-        self._set_session_cookie(session)
-        self.end_headers()
-        self.wfile.write(data)
+    def _download(self, name: str) -> None:
+        target = safe_output(name)
+        if not target: return self._page("<div class='card'><p>Dosya bulunamadı.</p></div>")
+        data = target.read_bytes(); suffix = target.suffix.lower().lstrip(".")
+        self.send_response(200); self.send_header("Content-Type", MIME_TYPES.get(suffix, "application/octet-stream")); self.send_header("Content-Length", str(len(data))); self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(target.name)}"); self.end_headers(); self.wfile.write(data)
 
-    def _bundle(self, job_id: str, kind: str, *, session: "_sessions_mod._Session") -> None:
-        sess_jobs = self._session_jobs(session)
-        sess_lock = self._session_jobs_lock(session)
-        with sess_lock:
-            result_items = list(sess_jobs.get(job_id, {}).get("results", []))
+    def _bundle(self, job_id: str, kind: str) -> None:
+        with jobs_lock: result_items = list(jobs.get(job_id, {}).get("results", []))
         keys = {"docx": ["docx"], "pdf": ["pdf"], "all": ["docx", "pdf"]}.get(kind)
-        if not keys:
-            return self._page("<div class='card'><p>Geçersiz paket isteği.</p></div>", session=session)
+        if not keys: return self._page("<div class='card'><p>Geçersiz paket isteği.</p></div>")
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for item in result_items:
                 for key in keys:
                     if item.get(key):
                         path = Path(item[key])
-                        if path.is_file():
-                            archive.write(path, path.name)
-        data = buffer.getvalue()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/zip")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Content-Disposition", f"attachment; filename=soru-kontrol-{kind}-raporlari.zip")
-        self._set_session_cookie(session)
-        self.end_headers()
-        self.wfile.write(data)
+                        if path.is_file(): archive.write(path, path.name)
+        data = buffer.getvalue(); self.send_response(200); self.send_header("Content-Type", "application/zip"); self.send_header("Content-Length", str(len(data))); self.send_header("Content-Disposition", f"attachment; filename=soru-kontrol-{kind}-raporlari.zip"); self.end_headers(); self.wfile.write(data)
 
     def do_POST(self) -> None:
+        global provider, connected
         touch_browser_activity()
-        sess = self._get_session()
-        content_type = self.headers.get("Content-Type", "")
-        length = int(self.headers.get("Content-Length", "0"))
-        uploads: list[Path] = []
-        staged_names: dict[Path, str] = {}
-        review_jobs: list[ReviewJob] = []
+        content_type = self.headers.get("Content-Type", ""); length = int(self.headers.get("Content-Length", "0")); uploads: list[Path] = []; staged_names: dict[Path, str] = {}; review_jobs: list[ReviewJob] = []
         try:
             form = None
             question_text = question_title = ""
@@ -1096,54 +943,24 @@ class Handler(BaseHTTPRequestHandler):
                 question_title = form.getfirst("question_title", "")
                 report_mode = "issues" if form.getfirst("report_mode", "") == "issues" else "full"
             else:
-                values = parse_qs(self.rfile.read(length).decode("utf-8"))
-                action = values.get("action", [""])[0]
-                requested_subject, subject_file, selected_paths = "auto", "", []
-
-            # --- Per-session provider ---
-            sess_provider = self._session_provider(sess)
-
-            home_url = self._url("/")
-            if action == "upload_session" and form is not None:
-                file_item = form["session_file"] if "session_file" in form else None
-                raw_bytes = b""
-                if getattr(file_item, "file", None):
-                    raw_bytes = file_item.file.read()
-                if not raw_bytes:
-                    raise ValueError("Lütfen geçerli bir storage_state.json dosyası seçin.")
-                sess_provider.import_storage_state(raw_bytes)
-                sess.connected = True
-                return self._page(f"<div class='card'><p class='ok'>✓ Oturum başarıyla yüklendi ve bağlandı!</p><a href='{home_url}'>Devam et</a></div>", session=sess)
-
-            if action == "paste_session":
-                session_json = (form.getfirst("session_json", "") if form else values.get("session_json", [""])[0]).strip()
-                if not session_json:
-                    raise ValueError("Lütfen JSON metnini girin.")
-                sess_provider.import_storage_state(session_json)
-                sess.connected = True
-                return self._page(f"<div class='card'><p class='ok'>✓ Oturum başarıyla kaydedildi ve bağlandı!</p><a href='{home_url}'>Devam et</a></div>", session=sess)
-
+                values = parse_qs(self.rfile.read(length).decode("utf-8")); action = values.get("action", [""])[0]; requested_subject, subject_file, selected_paths = "auto", "", []
             if action in {"connect", "reconnect"}:
-                asyncio.run(sess_provider.login("chrome", force=action == "reconnect"))
-                sess.connected = True
-                return self._page(f"<div class='card'><p class='ok'>Gmail oturumu hazır.</p><a href='{home_url}'>Devam et</a></div>", session=sess)
+                provider = NotebookLMPyProvider(); asyncio.run(provider.login("chrome", force=action == "reconnect")); connected = True
+                message = "Sunucu NotebookLM oturumu doğrulandı." if SERVER_MODE else "Gmail oturumu hazır."
+                return self._page(f"<div class='card'><p class='ok'>{message}</p><a href='/'>Devam et</a></div>")
             if action == "firefox":
-                asyncio.run(sess_provider.login("firefox"))
-                sess.connected = True
-                return self._page(f"<div class='card'><p class='ok'>Firefox oturumu hazır.</p><a href='{home_url}'>Devam et</a></div>", session=sess)
+                provider = NotebookLMPyProvider(); asyncio.run(provider.login("firefox")); connected = True
+                return self._page("<div class='card'><p class='ok'>Firefox oturumu hazır.</p><a href='/'>Devam et</a></div>")
             if action == "disconnect":
-                asyncio.run(sess_provider.disconnect(clear_auth=True))
-                sess.connected = False
-                return self._page(f"<div class='card'><p>Bağlantı kaldırıldı ve NotebookLM oturumu temizlendi.</p><a href='{home_url}'>Geri</a></div>", session=sess)
-            if action != "review":
-                return self._page(f"<div class='card'><p>Bilinmeyen işlem.</p><a href='{home_url}'>Geri</a></div>", session=sess)
-            if not sess.connected:
-                return self._page(f"<div class='card'><p class='warn'>Önce NotebookLM'ye bağlanın.</p><a href='{home_url}'>Geri</a></div>", session=sess)
-
-
-
-            upload_root = self._session_upload_dir(sess)
+                if SERVER_MODE:
+                    connected = False
+                    return self._page("<div class='card'><p>Sunucu kimliği uygulama içinden silinmez. Render Environment bölümündeki NOTEBOOKLM_AUTH_JSON değişkenini kaldırın.</p><a href='/'>Geri</a></div>")
+                asyncio.run(provider.disconnect(clear_auth=True)); connected = False
+                return self._page("<div class='card'><p>Bağlantı kaldırıldı ve yerel NotebookLM oturumu temizlendi.</p><a href='/'>Geri</a></div>")
+            if action != "review": return self._page("<div class='card'><p>Bilinmeyen işlem.</p><a href='/'>Geri</a></div>")
+            if not connected: return self._page("<div class='card'><p class='warn'>Önce NotebookLM'ye bağlanın.</p><a href='/'>Geri</a></div>")
             if form is not None:
+                upload_root = ROOT / "work" / "uploads"
                 items = form["uploads"] if "uploads" in form else []
                 if not isinstance(items, list): items = [items]
                 for item in items:
@@ -1158,20 +975,14 @@ class Handler(BaseHTTPRequestHandler):
                 if pasted is not None:
                     uploads.append(pasted)
                     staged_names[pasted.resolve()] = (question_title.strip() or "yapistirilan-soru") + ".md"
-
             paths: list[Path] = []; seen = set()
             for path in [*selected_paths, *uploads]:
                 resolved = path.resolve()
                 suffix = resolved.suffix.lower()
                 is_staged_text = resolved in staged_names and suffix == ".md"
-                if resolved not in seen and resolved.is_file() and (suffix in {".pdf", ".docx"} or is_staged_text):
-                    seen.add(resolved); paths.append(resolved)
-            if not paths:
-                raise ValueError("En az bir geçerli PDF, DOCX veya yapıştırılmış soru metni girin.")
-
-            config = load_config()
-            source_override = Path(subject_file) if subject_file else None
-            uploaded_set = {item.resolve() for item in uploads}
+                if resolved not in seen and resolved.is_file() and (suffix in {".pdf", ".docx"} or is_staged_text): seen.add(resolved); paths.append(resolved)
+            if not paths: raise ValueError("En az bir geçerli PDF, DOCX veya yapıştırılmış soru metni girin.")
+            config = load_config(); source_override = Path(subject_file) if subject_file else None; uploaded_set = {item.resolve() for item in uploads}
             try:
                 subject_timeout = int((config.get("rules_update") or {}).get("timeout_seconds", 20))
             except (TypeError, ValueError):
@@ -1180,75 +991,36 @@ class Handler(BaseHTTPRequestHandler):
             force_refresh = bool(form is not None and form.getfirst("force_refresh", "") == "1")
             for path in paths:
                 resolution = resolve_subject(path, requested_subject, source_override, config.get("subject_sources", {}), ROOT, timeout=subject_timeout)
-                if resolution.source_path is None:
-                    raise ValueError(f"{resolution.label} için ders kaynağı bulunamadı.")
-                review_jobs.append(ReviewJob(
-                    path, display_name=staged_names.get(path, path.name),
-                    subject=resolution.key, subject_path=resolution.source_path,
-                    subject_label=resolution.label, temporary_input=path in uploaded_set,
-                    temporary_subject=resolution.temporary, report_mode=report_mode,
-                    force_refresh=force_refresh,
-                ))
-
+                if resolution.source_path is None: raise ValueError(f"{resolution.label} için ders kaynağı bulunamadı. Dersi listeden seçin veya gelişmiş ayarlarda özel ders kaynağını belirtin.")
+                review_jobs.append(ReviewJob(path, display_name=staged_names.get(path, path.name), subject=resolution.key, subject_path=resolution.source_path, subject_label=resolution.label, temporary_input=path in uploaded_set, temporary_subject=resolution.temporary, report_mode=report_mode, force_refresh=force_refresh))
             job_id = uuid.uuid4().hex
-            sess_jobs = self._session_jobs(sess)
-            sess_lock = self._session_jobs_lock(sess)
-            with sess_lock:
-                sess_jobs[job_id] = {
-                    "status": "queued", "current": 0, "total": len(review_jobs),
-                    "file": "", "stage": "Kuyruğa alındı",
-                    "steps": progress_steps(), "queue": review_queue(review_jobs), "results": [],
-                }
-            output_dir = self._session_output_dir(sess)
-            threading.Thread(
-                target=run_batch,
-                args=(job_id, sess_provider, review_jobs, sess, output_dir),
-                daemon=True,
-            ).start()
-            return self._redirect(f"/status?job={quote(job_id)}", session=sess)
+            with jobs_lock: jobs[job_id] = {"status": "queued", "current": 0, "total": len(review_jobs), "file": "", "stage": "Kuyruğa alındı", "steps": progress_steps(), "queue": review_queue(review_jobs), "results": []}
+            threading.Thread(target=run_batch, args=(job_id, provider, review_jobs), daemon=True).start()
+            return self._redirect(f"/status?job={quote(job_id)}")
         except Exception as exc:
             for path in uploads:
                 path.unlink(missing_ok=True)
             for job in review_jobs:
                 if job.temporary_subject:
                     cleanup_subject_source(job.subject_path)
-            back_url = self._url("/")
-            return self._page(f"<div class='card'><p class='error'>İşlem başarısız: {html.escape(safe_error(str(exc)))}</p><a href='{back_url}'>Geri</a></div>", session=sess)
+            return self._page(f"<div class='card'><p class='error'>İşlem başarısız: {html.escape(safe_error(str(exc)))}</p><a href='/'>Geri</a></div>")
 
 
-
-
-
-
-def run_batch(
-    job_id: str,
-    active_provider,
-    review_jobs: list[ReviewJob],
-    session: "_sessions_mod._Session",
-    output_dir: Path,
-) -> None:
-    sess_jobs = session.jobs
-    sess_lock = session.jobs_lock
-
-    def _jobs_update(data: dict) -> None:
-        with sess_lock:
-            if job_id in sess_jobs:
-                sess_jobs[job_id].update(data)
-
-    def _progress_callback(key: str, detail: str) -> None:
-        _update_progress_in(job_id, key, detail, sess_jobs, sess_lock)
+def run_batch(job_id: str, active_provider, review_jobs: list[ReviewJob]) -> None:
+    global connected
 
     async def work() -> None:
-        engine = ReviewEngine(active_provider, ROOT / "rules" / "rules.bin", output_dir)
-        _jobs_update({"status": "running"})
+        engine = ReviewEngine(active_provider, ROOT / "rules" / "rules.bin", ROOT / "outputs")
+        with jobs_lock: jobs[job_id]["status"] = "running"
         for index, job in enumerate(review_jobs, 1):
-            with sess_lock:
-                if job_id in sess_jobs:
-                    sess_jobs[job_id].update({"file": job.display_name or job.path.name, "stage": "Hazırlanıyor", "steps": progress_steps()})
-                    if index <= len(sess_jobs[job_id].get("queue", [])):
-                        sess_jobs[job_id]["queue"][index - 1].update({"status": "running", "detail": "Hazırlanıyor"})
+            with jobs_lock:
+                jobs[job_id].update({"file": job.display_name or job.path.name, "stage": "Hazırlanıyor", "steps": progress_steps()})
+                if index <= len(jobs[job_id].get("queue", [])):
+                    jobs[job_id]["queue"][index - 1].update({"status": "running", "detail": "Hazırlanıyor"})
+            def progress(key: str, detail: str) -> None:
+                update_progress(job_id, key, detail)
             try:
-                result = await engine.run(job, on_progress=_progress_callback)
+                result = await engine.run(job, on_progress=progress)
             finally:
                 if job.temporary_input:
                     job.path.unlink(missing_ok=True)
@@ -1260,37 +1032,31 @@ def run_batch(
                 if result.markdown_path and result.markdown_path.is_file():
                     item["raw"] = str(result.markdown_path)
                 if is_auth_error(result.error):
-                    session.connected = False
-            else:
-                item.update({"docx": str(result.docx_path), "pdf": str(result.pdf_path), "md": str(result.markdown_path), "json": str(result.json_path), "cached": bool(result.metadata.get("cached"))})
-            _progress_callback(
+                    connected = False
+            else: item.update({"docx": str(result.docx_path), "pdf": str(result.pdf_path), "md": str(result.markdown_path), "json": str(result.json_path), "cached": bool(result.metadata.get("cached"))})
+            update_progress(
+                job_id,
                 "complete",
                 "Raporlar hazır; geçici defter temizlendi"
                 if not result.error
                 else "İşlem tamamlandı; mevcut NotebookLM yanıtı korundu",
             )
-            with sess_lock:
-                if job_id in sess_jobs:
-                    sess_jobs[job_id]["results"].append(item)
-                    if index <= len(sess_jobs[job_id].get("queue", [])):
-                        queue_item = sess_jobs[job_id]["queue"][index - 1]
-                        queue_item.update(item)
-                        queue_item.update({"status": "error" if item.get("error") else "completed", "detail": "Rapor hazırlanamadı" if item.get("error") else "Rapor hazır"})
-                    sess_jobs[job_id].update({"current": index, "stage": "Rapor dışa aktarıldı; geçici defter temizlendi"})
-        with sess_lock:
-            if job_id in sess_jobs:
-                sess_jobs[job_id]["status"] = "completed" if all("error" not in item for item in sess_jobs[job_id]["results"]) else "completed_with_errors"
-
+            with jobs_lock:
+                jobs[job_id]["results"].append(item)
+                if index <= len(jobs[job_id].get("queue", [])):
+                    queue_item = jobs[job_id]["queue"][index - 1]
+                    queue_item.update(item)
+                    queue_item.update({"status": "error" if item.get("error") else "completed", "detail": "Rapor hazırlanamadı" if item.get("error") else "Rapor hazır"})
+                jobs[job_id].update({"current": index, "stage": "Rapor dışa aktarıldı; geçici defter temizlendi"})
+        with jobs_lock: jobs[job_id]["status"] = "completed" if all("error" not in item for item in jobs[job_id]["results"]) else "completed_with_errors"
     try:
         asyncio.run(work())
     except Exception as exc:
         error = safe_error(str(exc))
-        with sess_lock:
-            if job_id not in sess_jobs:
-                return
-            state = sess_jobs[job_id]
+        with jobs_lock:
+            state = jobs[job_id]
             state["status"] = "completed_with_errors"
-            running_index = next((idx for idx, it in enumerate(state.get("queue", [])) if it.get("status") == "running"), None)
+            running_index = next((index for index, item in enumerate(state.get("queue", [])) if item.get("status") == "running"), None)
             if running_index is not None:
                 failed = {"name": state["queue"][running_index].get("name", "İş kuyruğu"), "subject": state["queue"][running_index].get("subject", ""), "report_mode": state["queue"][running_index].get("report_mode", "full"), "error": error}
                 state["queue"][running_index].update(failed | {"status": "error", "detail": "Rapor hazırlanamadı"})
@@ -1298,11 +1064,11 @@ def run_batch(
             else:
                 state["results"].append({"name": "İş kuyruğu", "error": error})
     finally:
+        # If an unexpected batch-level exception stops the loop, clean the
+        # not-yet-processed remote course sources as well.
         for job in review_jobs:
             if job.temporary_subject:
                 cleanup_subject_source(job.subject_path)
-
-
 
 
 PROGRESS_STEPS = [
@@ -1439,29 +1205,7 @@ def status_revision(state: dict) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
-def _update_progress_in(job_id: str, key: str, detail: str, sess_jobs: dict, sess_lock: threading.Lock) -> None:
-    """Session-aware progress updater used by run_batch."""
-    with sess_lock:
-        state = sess_jobs.get(job_id)
-        if not state:
-            return
-        steps = state.get("steps", [])
-        current_index = next((i for i, step in enumerate(steps) if step["key"] == key), None)
-        if current_index is None:
-            return
-        for index, step in enumerate(steps):
-            if index < current_index:
-                if step["status"] == "active":
-                    step["status"] = "done"
-                elif step["status"] == "pending":
-                    step.update({"status": "skipped", "detail": "Bu işlemde çalıştırılmadı"})
-            elif index == current_index:
-                step.update({"status": "done" if key == "complete" else "active", "detail": detail})
-        state["stage"] = detail
-
-
 def update_progress(job_id: str, key: str, detail: str) -> None:
-    """Legacy global-jobs progress updater (retained for FAKE_MODE / tests)."""
     with jobs_lock:
         state = jobs.get(job_id)
         if not state: return
@@ -1504,8 +1248,6 @@ def main() -> None:
         ) from exc
     _write_server_pid()
     touch_browser_activity()
-    # Start per-user session cleanup daemon
-    _sessions_mod.start_cleanup_daemon()
     timeout_seconds = idle_shutdown_seconds()
     if timeout_seconds > 0:
         threading.Thread(target=idle_watchdog, args=(server, timeout_seconds), daemon=True).start()

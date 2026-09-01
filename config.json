@@ -1,7 +1,6 @@
 {
   "input_dir": "",
-  "idle_shutdown_seconds": 0,
-
+  "idle_shutdown_seconds": 300,
   "rules_update": {
     "rules_url": "",
     "manifest_url": "",
