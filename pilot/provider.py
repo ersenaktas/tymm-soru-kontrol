@@ -221,7 +221,7 @@ class NotebookLMPyProvider:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
             raise RuntimeError("notebooklm-py kurulu değil; pip install -e .[notebooklm]") from exc
-        kwargs = {}
+        kwargs = {"allow_headless": True}
         storage_file = self._find_storage_file()
         if storage_file:
             kwargs["path"] = str(storage_file)
@@ -244,11 +244,13 @@ class NotebookLMPyProvider:
         client_kwargs: dict = {
             "timeout": self.UPLOAD_TIMEOUT_SECONDS,
             "chat_timeout": self.CHAT_TIMEOUT_SECONDS,
+            "allow_headless": True,
         }
         storage_file = self._find_storage_file()
         if storage_file:
             client_kwargs["path"] = str(storage_file)
         async with NotebookLMClient.from_storage(**client_kwargs) as client:
+
             notebook = None
             try:
 
