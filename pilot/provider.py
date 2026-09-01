@@ -141,8 +141,23 @@ class NotebookLMPyProvider:
                 timeout=660,
                 env=self._env(),
             )
+            # Fallback: if 'chrome' channel fails due to missing binary, try 'chromium'
+            if completed.returncode != 0 and browser == "chrome" and "Chromium distribution 'chrome' is not found" in (completed.stderr or completed.stdout or ""):
+                alt_command = [sys.executable, "-m", "notebooklm", "login", "--browser", "chromium", "--browser-timeout", "600"]
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    alt_command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=660,
+                    env=self._env(),
+                )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("Gmail girişi 10 dakika içinde tamamlanmadı. Tarayıcıdaki giriş penceresini tamamlayıp yeniden deneyin.") from exc
+
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout or "").strip()
             detail = self._redact_login_output(detail)
