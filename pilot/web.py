@@ -484,13 +484,13 @@ def idle_shutdown_seconds() -> int:
     raw = os.environ.get("PILOT_IDLE_TIMEOUT_SECONDS", "")
     if not raw:
         try:
-            raw = str(load_config().get("idle_shutdown_seconds", 300))
+            raw = str(load_config().get("idle_shutdown_seconds", 0))
         except Exception:
-            raw = "300"
+            raw = "0"
     try:
         value = int(raw)
     except (TypeError, ValueError):
-        value = 300
+        value = 0
     if value <= 0:
         return 0
     return min(3600, max(30, value))
@@ -512,7 +512,7 @@ def idle_watchdog(server: ThreadingHTTPServer, timeout_seconds: int) -> None:
     if timeout_seconds <= 0:
         return
     while True:
-        time.sleep(5)
+        time.sleep(10)
         with activity_lock:
             idle_for = time.monotonic() - last_browser_activity
         if idle_for < timeout_seconds or has_active_jobs():
@@ -520,6 +520,7 @@ def idle_watchdog(server: ThreadingHTTPServer, timeout_seconds: int) -> None:
         print(f"Tarayici baglantisi {timeout_seconds} saniyedir yok; yerel sunucu kapatiliyor.", flush=True)
         server.shutdown()
         return
+
 
 
 def safe_error(value: str | None) -> str:
