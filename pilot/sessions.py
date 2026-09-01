@@ -37,8 +37,8 @@ class _Session:
         self.outputs_dir = self.base / "outputs"
         self.uploads_dir = self.base / "uploads"
         self.work_dir = self.base / "work"
-        self.connected: bool = False
         self._last_activity: float = time.monotonic()
+
         # Each session tracks its own in-progress jobs
         self.jobs: dict[str, dict] = {}
         self.jobs_lock = threading.Lock()
@@ -50,6 +50,22 @@ class _Session:
             self.work_dir,
         ):
             d.mkdir(parents=True, exist_ok=True)
+
+        # Auto-seed default corporate / admin authentication if available
+        default_auth = root / "auth" / "storage_state.json"
+        if default_auth.is_file():
+            profile_dir = self.notebooklm_home / "profiles" / "default"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(default_auth, profile_dir / "storage_state.json")
+                shutil.copy2(default_auth, self.notebooklm_home / "storage_state.json")
+                self.connected = True
+            except Exception:
+                self.connected = False
+        else:
+            self.connected = False
+
+
 
     def touch(self) -> None:
         self._last_activity = time.monotonic()

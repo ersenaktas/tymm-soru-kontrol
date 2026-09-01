@@ -730,9 +730,10 @@ class Handler(BaseHTTPRequestHandler):
         subject_options = "<option value='auto'>Otomatik (dosya adı + içerik)</option>" + "".join(f"<option value='{key}'>{label}</option>" for key, label in SUBJECT_LABELS.items())
         post_url = self._url("")
         if connected:
-            connection = "<span class='status-pill ready'><span class='status-dot'></span>Gmail bağlantısı hazır</span><p>Dosyanızı seçerek değerlendirmeye başlayabilirsiniz.</p>"
-            connection_actions = f"<form method='post' action='{post_url}'><button class='secondary' name='action' value='disconnect'>Bağlantıyı kaldır</button></form>"
+            connection = "<span class='status-pill ready'><span class='status-dot'></span>Soru Kontrol Motoru Hazır</span><p>Soru dosyanızı yükleyerek hemen değerlendirmeye başlayabilirsiniz.</p>"
+            connection_actions = f"<form method='post' action='{post_url}'><button class='secondary' name='action' value='disconnect' title='Gerekirse oturumu sıfırlayın'>Oturumu Sıfırla</button></form>"
             review_hint = "Dosyanız sıraya alınarak rapor hazırlanır."
+
         else:
             connection = "<span class='status-pill waiting'><span class='status-dot'></span>Giriş gerekli</span><p>Değerlendirme başlatmak için Gmail hesabınızı bağlayın veya oturum dosyanızı yükleyin.</p>"
             connection_actions = f"""
