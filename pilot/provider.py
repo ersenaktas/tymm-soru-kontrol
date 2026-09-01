@@ -1,7 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Protocol
-import asyncio, hashlib, os, subprocess, sys
+import asyncio, hashlib, os, subprocess, sys, zipfile
 
 from .review_contract import canonicalize_report_markdown, missing_detailed_sections, report_detail_score
 
@@ -244,23 +244,26 @@ class NotebookLMPyProvider:
                 scoped_sources = [rule_source]
                 subject_source_title = subject_file.name
                 self._progress(on_progress, "subject_upload", f"Ders kaynağı ekleniyor: {subject_source_title}")
-                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                scoped_sources.append(await self._add_file_with_clean_retry(
+                    client,
                     notebook.id,
                     subject_file,
-                    wait=True,
-                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    title=subject_source_title,
-                )))
+                    subject_source_title,
+                    on_progress,
+                    "subject_upload",
+                ))
                 display_name = question_title or question_file.name
                 question_source_title = self._question_source_title(question_file, display_name)
                 self._progress(on_progress, "question_upload", f"Soru dosyası ekleniyor: {display_name}")
-                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                self._validate_upload_document(question_file)
+                scoped_sources.append(await self._add_file_with_clean_retry(
+                    client,
                     notebook.id,
                     question_file,
-                    wait=True,
-                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    title=question_source_title,
-                )))
+                    question_source_title,
+                    on_progress,
+                    "question_upload",
+                ))
                 source_ids = [source.id for source in scoped_sources]
                 await self._enable_detailed_mode(client, notebook.id, on_progress)
                 # V7 performs the full internal review but reports only
@@ -295,6 +298,84 @@ class NotebookLMPyProvider:
     @staticmethod
     def _progress(callback, key: str, text: str) -> None:
         if callback: callback(key, text)
+
+    @staticmethod
+    def _upload_mime_type(path: Path) -> str | None:
+        """Pin document MIME types so slim Linux images do not depend on /etc/mime.types."""
+        return {
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".pdf": "application/pdf",
+            ".md": "text/markdown",
+        }.get(path.suffix.lower())
+
+    @staticmethod
+    def _validate_upload_document(path: Path) -> None:
+        """Reject a damaged DOCX locally before creating a NotebookLM source row."""
+        if path.suffix.lower() != ".docx":
+            return
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = set(archive.namelist())
+                if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                    raise ValueError
+                bad_member = archive.testzip()
+                if bad_member is not None:
+                    raise ValueError
+        except (OSError, zipfile.BadZipFile, ValueError) as exc:
+            raise ValueError(
+                f"{path.name} geçerli bir DOCX dosyası değil veya arşivi bozuk. "
+                "Dosyayı Word'de açıp Farklı Kaydet ile yeniden kaydedin."
+            ) from exc
+
+    async def _add_file_with_clean_retry(
+        self,
+        client,
+        notebook_id: str,
+        path: Path,
+        title: str,
+        callback,
+        progress_key: str,
+        *,
+        attempts: int = 3,
+    ):
+        """Retry a file upload only after removing its retained failed source row.
+
+        notebooklm-py deliberately exposes ``source_id`` on failures that occur
+        after source registration. Retrying without deleting that row leaves the
+        failed duplicate visible next to the successful retry.
+        """
+        mime_type = self._upload_mime_type(path)
+        for attempt in range(1, attempts + 1):
+            try:
+                return await client.sources.add_file(
+                    notebook_id,
+                    path,
+                    mime_type=mime_type,
+                    wait=True,
+                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                    title=title,
+                )
+            except Exception as exc:
+                partial_source_id = str(getattr(exc, "source_id", "") or "").strip()
+                if partial_source_id:
+                    try:
+                        await client.sources.delete(notebook_id, partial_source_id)
+                    except Exception as cleanup_exc:
+                        raise RuntimeError(
+                            f"{path.name} yüklemesi başarısız oldu ve NotebookLM'deki "
+                            "yarım kaynak temizlenemedi; yinelenen kaynak oluşturmamak "
+                            "için otomatik tekrar durduruldu."
+                        ) from cleanup_exc
+                if attempt == attempts:
+                    raise
+                self._progress(
+                    callback,
+                    progress_key,
+                    f"{path.name} yüklenemedi; başarısız kaynak temizlendi ve "
+                    f"yeniden deneniyor ({attempt + 1}/{attempts})",
+                )
+                await asyncio.sleep(attempt * 3)
+        raise RuntimeError(f"{path.name} yüklenemedi")  # pragma: no cover
 
     @staticmethod
     def _answer_text(answer: object) -> str:
