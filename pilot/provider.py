@@ -1,7 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Protocol
-import asyncio, hashlib, os, subprocess, sys
+import asyncio, hashlib, os, subprocess, sys, unicodedata
+
 
 from .review_contract import canonicalize_report_markdown, missing_detailed_sections, report_detail_score
 
@@ -266,25 +267,47 @@ class NotebookLMPyProvider:
                     wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
                 ))
                 scoped_sources = [rule_source]
-                subject_source_title = subject_file.name
+                subject_source_title = unicodedata.normalize("NFC", subject_file.name)
                 self._progress(on_progress, "subject_upload", f"Ders kaynağı ekleniyor: {subject_source_title}")
-                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
-                    notebook.id,
-                    subject_file,
-                    wait=True,
-                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    title=subject_source_title,
-                )))
-                display_name = question_title or question_file.name
+                if subject_file.suffix.lower() in {".md", ".txt"}:
+                    subject_content = subject_file.read_text(encoding="utf-8", errors="replace")
+                    scoped_sources.append(await self._retry(lambda: client.sources.add_text(
+                        notebook.id,
+                        subject_source_title,
+                        subject_content,
+                        wait=True,
+                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                    )))
+                else:
+                    scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                        notebook.id,
+                        subject_file,
+                        wait=True,
+                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                        title=subject_source_title,
+                    )))
+
+                display_name = unicodedata.normalize("NFC", question_title or question_file.name)
                 question_source_title = self._question_source_title(question_file, display_name)
                 self._progress(on_progress, "question_upload", f"Soru dosyası ekleniyor: {display_name}")
-                scoped_sources.append(await self._retry(lambda: client.sources.add_file(
-                    notebook.id,
-                    question_file,
-                    wait=True,
-                    wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    title=question_source_title,
-                )))
+                if question_file.suffix.lower() in {".md", ".txt"}:
+                    question_content = question_file.read_text(encoding="utf-8", errors="replace")
+                    scoped_sources.append(await self._retry(lambda: client.sources.add_text(
+                        notebook.id,
+                        question_source_title,
+                        question_content,
+                        wait=True,
+                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                    )))
+                else:
+                    scoped_sources.append(await self._retry(lambda: client.sources.add_file(
+                        notebook.id,
+                        question_file,
+                        wait=True,
+                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                        title=question_source_title,
+                    )))
+
                 source_ids = [source.id for source in scoped_sources]
                 await self._enable_detailed_mode(client, notebook.id, on_progress)
                 # V7 performs the full internal review but reports only
