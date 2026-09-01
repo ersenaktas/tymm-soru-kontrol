@@ -30,7 +30,12 @@ BRAND_LOGO_PATH = ROOT / "assets" / "OGM_logo_beyaz_yatay.png"
 PILOT_BUILD = "0.6.47-larger-header-logo"
 FAKE_MODE = os.environ.get("PILOT_FAKE") == "1"
 SERVER_MODE = bool(os.environ.get("PORT") or os.environ.get("RENDER") or os.environ.get("PILOT_SERVER_MODE") == "1")
-SERVER_AUTH_PATH = os.environ.get("PILOT_NOTEBOOKLM_STORAGE_PATH", "").strip()
+_configured_server_auth_path = os.environ.get("PILOT_NOTEBOOKLM_STORAGE_PATH", "").strip()
+_embedded_server_auth_path = Path("/app/server_auth/storage_state.json")
+if SERVER_MODE and _embedded_server_auth_path.is_file():
+    SERVER_AUTH_PATH = str(_embedded_server_auth_path)
+else:
+    SERVER_AUTH_PATH = _configured_server_auth_path or ("/etc/secrets/storage_state.json" if SERVER_MODE else "")
 SERVER_AUTH_CONFIGURED = bool(
     os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip()
     or (SERVER_AUTH_PATH and Path(SERVER_AUTH_PATH).is_file())
@@ -641,7 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             connection_actions = "<form method='post'><button name='action' value='connect'>Bağlantıyı doğrula</button></form>"
             review_hint = "Önce üst bölümden sunucu bağlantısını doğrulayın."
         elif SERVER_MODE:
-            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Sunucu kimliği eksik</span><p>Render'a storage_state.json gizli dosyasını ekleyin.</p>"
+            connection = f"<span class='status-pill waiting'><span class='status-dot'></span>Sunucu kimliği eksik</span><p>NotebookLM oturum dosyası bulunamadı. Beklenen yol: {html.escape(SERVER_AUTH_PATH)}.</p>"
             connection_actions = "<form method='post'><button name='action' value='connect'>Yapılandırmayı kontrol et</button></form>"
             review_hint = "Önce Render'da sunucu kimliğini yapılandırın."
         else:

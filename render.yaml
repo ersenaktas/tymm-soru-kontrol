@@ -10,6 +10,6 @@ services:
       - key: PILOT_IDLE_TIMEOUT_SECONDS
         value: "0"
       - key: PILOT_NOTEBOOKLM_STORAGE_PATH
-        value: /etc/secrets/storage_state.json
+        value: /app/server_auth/storage_state.json
       - key: NOTEBOOKLM_AUTH_JSON
         sync: false

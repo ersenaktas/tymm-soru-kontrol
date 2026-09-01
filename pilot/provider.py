@@ -51,15 +51,31 @@ class NotebookLMPyProvider:
     CHAT_TIMEOUT_SECONDS = 600.0
     QUESTION_SOURCE_PREFIX = "[SoruKontrol]"
     MAX_DETAIL_RECOVERY_MODULES = 8
+    EMBEDDED_SERVER_STORAGE_PATH = Path("/app/server_auth/storage_state.json")
+    DEFAULT_SERVER_STORAGE_PATH = Path("/etc/secrets/storage_state.json")
 
     def __init__(self):
         self.client = None; self._context = None
 
     @staticmethod
     def _storage_path() -> Path | None:
-        """Return an explicitly mounted auth file without exposing its data."""
+        """Return the mounted auth file path without exposing its data."""
         raw = os.environ.get("PILOT_NOTEBOOKLM_STORAGE_PATH", "").strip()
-        return Path(raw) if raw else None
+        server_mode = bool(
+            os.environ.get("PORT")
+            or os.environ.get("RENDER")
+            or os.environ.get("PILOT_SERVER_MODE") == "1"
+        )
+        configured_path = Path(raw) if raw else None
+        if configured_path is not None and configured_path.is_file():
+            return configured_path
+        # Temporary pilot fallback: the user explicitly requested that the
+        # current storage state be baked into the server image for testing.
+        if server_mode and NotebookLMPyProvider.EMBEDDED_SERVER_STORAGE_PATH.is_file():
+            return NotebookLMPyProvider.EMBEDDED_SERVER_STORAGE_PATH
+        if configured_path is not None:
+            return configured_path
+        return NotebookLMPyProvider.DEFAULT_SERVER_STORAGE_PATH if server_mode else None
 
     @classmethod
     def _cli_command(cls, *arguments: str) -> list[str]:
@@ -127,7 +143,9 @@ class NotebookLMPyProvider:
             if not os.environ.get("NOTEBOOKLM_AUTH_JSON", "").strip() and not has_auth_file:
                 raise RuntimeError(
                     "Sunucuda etkileşimli Gmail penceresi açılamaz. "
-                    "Render'a storage_state.json gizli dosyasını ekleyin."
+                    "Render Secret Files bölümüne dosya adı tam olarak "
+                    "storage_state.json olacak şekilde gizli dosyayı ekleyin; "
+                    "beklenen yol /etc/secrets/storage_state.json."
                 )
             raise RuntimeError(
                 "Sunucudaki NotebookLM oturumu geçersiz veya süresi dolmuş. "

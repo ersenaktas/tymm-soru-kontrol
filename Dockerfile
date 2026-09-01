@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 ENV PILOT_PORT=8765
 ENV PILOT_HOST=0.0.0.0
 ENV PILOT_IDLE_TIMEOUT_SECONDS=0
+ENV PILOT_NOTEBOOKLM_STORAGE_PATH=/app/server_auth/storage_state.json
 
 # Render sets PORT at runtime – the app reads it in main()
 EXPOSE 8765
