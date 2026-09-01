@@ -199,15 +199,32 @@ class NotebookLMPyProvider:
         text = re.sub(r"(?i)[A-Za-z]:\\[^\r\n]*storage_state\.json", "NotebookLM oturum dosyası", text)
         return " ".join(text.split())
 
-    async def _open_client(self):
+    def _find_storage_file(self) -> Path | None:
+        """Find the active storage_state.json for this session or fallback to default."""
+        if self._notebooklm_home:
+            p1 = self._notebooklm_home / "profiles" / "default" / "storage_state.json"
+            if p1.is_file():
+                return p1
+            p2 = self._notebooklm_home / "storage_state.json"
+            if p2.is_file():
+                return p2
+        auth_root = Path(__file__).resolve().parents[1] / "auth" / "storage_state.json"
+        if auth_root.is_file():
+            return auth_root
+        user_default = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
+        if user_default.is_file():
+            return user_default
+        return None
 
+    async def _open_client(self):
         try:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
             raise RuntimeError("notebooklm-py kurulu değil; pip install -e .[notebooklm]") from exc
         kwargs = {}
-        if self._notebooklm_home:
-            kwargs["storage_path"] = str(self._notebooklm_home)
+        storage_file = self._find_storage_file()
+        if storage_file:
+            kwargs["path"] = str(storage_file)
         self._context = NotebookLMClient.from_storage(**kwargs)
         self.client = await self._context.__aenter__()
 
@@ -228,11 +245,13 @@ class NotebookLMPyProvider:
             "timeout": self.UPLOAD_TIMEOUT_SECONDS,
             "chat_timeout": self.CHAT_TIMEOUT_SECONDS,
         }
-        if self._notebooklm_home:
-            client_kwargs["storage_path"] = str(self._notebooklm_home)
+        storage_file = self._find_storage_file()
+        if storage_file:
+            client_kwargs["path"] = str(storage_file)
         async with NotebookLMClient.from_storage(**client_kwargs) as client:
             notebook = None
             try:
+
 
                 self._progress(on_progress, "notebook_create", "Geçici NotebookLM defteri oluşturuluyor")
                 notebook = await self._retry(lambda: client.notebooks.create(f"Soru kontrol {question_file.stem}"))
