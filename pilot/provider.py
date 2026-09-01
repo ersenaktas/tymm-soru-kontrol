@@ -290,23 +290,39 @@ class NotebookLMPyProvider:
                 display_name = unicodedata.normalize("NFC", question_title or question_file.name)
                 question_source_title = self._question_source_title(question_file, display_name)
                 self._progress(on_progress, "question_upload", f"Soru dosyası ekleniyor: {display_name}")
+                question_source = None
                 if question_file.suffix.lower() in {".md", ".txt"}:
                     question_content = question_file.read_text(encoding="utf-8", errors="replace")
-                    scoped_sources.append(await self._retry(lambda: client.sources.add_text(
+                    question_source = await self._retry(lambda: client.sources.add_text(
                         notebook.id,
                         question_source_title,
                         question_content,
                         wait=True,
                         wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                    )))
+                    ))
                 else:
-                    scoped_sources.append(await self._retry(lambda: client.sources.add_file(
-                        notebook.id,
-                        question_file,
-                        wait=True,
-                        wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
-                        title=question_source_title,
-                    )))
+                    try:
+                        question_source = await self._retry(lambda: client.sources.add_file(
+                            notebook.id,
+                            question_file,
+                            wait=True,
+                            wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                            title=question_source_title,
+                        ))
+                    except Exception as upload_exc:
+                        self._progress(on_progress, "question_upload", f"Soru metni doğrudan ayrıştırılarak aktarılıyor: {display_name}")
+                        extracted_content = self._extract_text_from_file(question_file)
+                        if not extracted_content:
+                            raise upload_exc
+                        question_source = await self._retry(lambda: client.sources.add_text(
+                            notebook.id,
+                            question_source_title,
+                            extracted_content,
+                            wait=True,
+                            wait_timeout=self.UPLOAD_TIMEOUT_SECONDS,
+                        ))
+                scoped_sources.append(question_source)
+
 
                 source_ids = [source.id for source in scoped_sources]
                 await self._enable_detailed_mode(client, notebook.id, on_progress)
@@ -559,9 +575,47 @@ class NotebookLMPyProvider:
                 await asyncio.sleep(delays[min(attempt - 1, len(delays) - 1)])
         raise last_error  # pragma: no cover
 
+    @staticmethod
+    def _extract_text_from_file(file_path: Path) -> str:
+        """Extract structured text from DOCX, PDF, MD, or TXT locally."""
+        suffix = file_path.suffix.lower()
+        if suffix in {".md", ".txt"}:
+            return file_path.read_text(encoding="utf-8", errors="replace")
+        if suffix == ".docx":
+            try:
+                import docx
+                doc = docx.Document(file_path)
+                parts = []
+                for p in doc.paragraphs:
+                    t = p.text.strip()
+                    if t:
+                        parts.append(t)
+                for table in doc.tables:
+                    for row in table.rows:
+                        row_cells = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                        if row_cells:
+                            parts.append(" | ".join(row_cells))
+                return "\n\n".join(parts)
+            except Exception:
+                return ""
+        if suffix == ".pdf":
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(str(file_path))
+                parts = []
+                for page in reader.pages:
+                    t = page.extract_text()
+                    if t and t.strip():
+                        parts.append(t.strip())
+                return "\n\n".join(parts)
+            except Exception:
+                return ""
+        return ""
+
     async def disconnect(self, clear_auth: bool = False) -> None:
         if self._context is not None:
             await self._context.__aexit__(None, None, None)
         self._context = None; self.client = None
         if clear_auth:
             await asyncio.to_thread(subprocess.run, [sys.executable, "-m", "notebooklm", "auth", "logout"], check=False, capture_output=True, text=True)
+
