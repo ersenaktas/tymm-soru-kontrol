@@ -734,9 +734,25 @@ class Handler(BaseHTTPRequestHandler):
             connection_actions = f"<form method='post' action='{post_url}'><button class='secondary' name='action' value='disconnect'>Bağlantıyı kaldır</button></form>"
             review_hint = "Dosyanız sıraya alınarak rapor hazırlanır."
         else:
-            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Giriş gerekli</span><p>Değerlendirme başlatmak için Gmail hesabınızı bağlayın.</p>"
-            connection_actions = f"<form method='post' action='{post_url}'><button name='action' value='connect'>Gmail ile giriş yap</button></form>"
-            review_hint = "Önce üst bölümden Gmail ile giriş yapın."
+            connection = "<span class='status-pill waiting'><span class='status-dot'></span>Giriş gerekli</span><p>Değerlendirme başlatmak için Gmail hesabınızı bağlayın veya oturum dosyanızı yükleyin.</p>"
+            connection_actions = f"""
+            <form method='post' action='{post_url}'><button name='action' value='connect'>Gmail ile otomatik bağlan</button></form>
+            <details class='auth-manual-details' style='margin-top:10px;'>
+              <summary style='cursor:pointer;color:#215e99;font-weight:600;font-size:0.9rem;'>📁 Oturum Dosyası (.json) Yükle veya Yapıştır</summary>
+              <div style='background:#f8fafc;padding:12px;border-radius:6px;margin-top:8px;border:1px solid #e2e8f0;'>
+                <p class='help' style='margin:0 0 8px 0;font-size:0.82rem;'>Sunucuda doğrudan bağlanmak için <code>storage_state.json</code> dosyanızı seçin:</p>
+                <form method='post' action='{post_url}' enctype='multipart/form-data' style='display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;'>
+                  <input type='file' name='session_file' accept='.json' required style='font-size:0.85rem;'>
+                  <button name='action' value='upload_session' style='padding:6px 12px;font-size:0.85rem;'>Yükle ve Bağlan</button>
+                </form>
+                <form method='post' action='{post_url}'>
+                  <textarea name='session_json' rows='2' placeholder='Veya JSON içeriğini buraya yapıştırın...' style='width:100%;font-size:0.8rem;padding:6px;border-radius:4px;border:1px solid #cbd5e1;box-sizing:border-box;'></textarea>
+                  <button name='action' value='paste_session' class='secondary' style='margin-top:4px;padding:4px 10px;font-size:0.8rem;'>Metni Kaydet</button>
+                </form>
+              </div>
+            </details>
+            """
+
         folder_error_html = f"<p class='error'>{html.escape(folder_error)}</p>" if folder_error else ""
         advanced_open = " open" if folder or folder_error else ""
         body = f"""
@@ -1083,6 +1099,25 @@ class Handler(BaseHTTPRequestHandler):
             sess_provider = self._session_provider(sess)
 
             home_url = self._url("/")
+            if action == "upload_session" and form is not None:
+                file_item = form["session_file"] if "session_file" in form else None
+                raw_bytes = b""
+                if getattr(file_item, "file", None):
+                    raw_bytes = file_item.file.read()
+                if not raw_bytes:
+                    raise ValueError("Lütfen geçerli bir storage_state.json dosyası seçin.")
+                sess_provider.import_storage_state(raw_bytes)
+                sess.connected = True
+                return self._page(f"<div class='card'><p class='ok'>✓ Oturum başarıyla yüklendi ve bağlandı!</p><a href='{home_url}'>Devam et</a></div>", session=sess)
+
+            if action == "paste_session":
+                session_json = (form.getfirst("session_json", "") if form else values.get("session_json", [""])[0]).strip()
+                if not session_json:
+                    raise ValueError("Lütfen JSON metnini girin.")
+                sess_provider.import_storage_state(session_json)
+                sess.connected = True
+                return self._page(f"<div class='card'><p class='ok'>✓ Oturum başarıyla kaydedildi ve bağlandı!</p><a href='{home_url}'>Devam et</a></div>", session=sess)
+
             if action in {"connect", "reconnect"}:
                 asyncio.run(sess_provider.login("chrome", force=action == "reconnect"))
                 sess.connected = True
@@ -1099,6 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._page(f"<div class='card'><p>Bilinmeyen işlem.</p><a href='{home_url}'>Geri</a></div>", session=sess)
             if not sess.connected:
                 return self._page(f"<div class='card'><p class='warn'>Önce NotebookLM'ye bağlanın.</p><a href='{home_url}'>Geri</a></div>", session=sess)
+
 
 
             upload_root = self._session_upload_dir(sess)

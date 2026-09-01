@@ -166,6 +166,30 @@ class NotebookLMPyProvider:
         # Do not create the API client here: the web handler and the job engine
         # use different asyncio.run loops. The client is loop-affine.
 
+    def import_storage_state(self, raw_json: str | bytes) -> bool:
+        """Save a storage_state.json payload directly into this session's profile."""
+        import json as _json
+        if isinstance(raw_json, bytes):
+            raw_json = raw_json.decode("utf-8", errors="replace")
+        try:
+            data = _json.loads(raw_json)
+            if not isinstance(data, dict):
+                raise ValueError("JSON bir nesne (object) olmalıdır.")
+        except Exception as exc:
+            raise ValueError(f"Geçersiz JSON formatı: {exc}") from exc
+
+        # Save to notebooklm home profile directory
+        target_dir = (self._notebooklm_home or Path.home() / ".notebooklm") / "profiles" / "default"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / "storage_state.json"
+        target_file.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+
+        # Also save at root of notebooklm_home for legacy lookup
+        if self._notebooklm_home:
+            (self._notebooklm_home / "storage_state.json").write_text(_json.dumps(data, indent=2), encoding="utf-8")
+
+        return True
+
     @staticmethod
     def _redact_login_output(value: str) -> str:
         """Keep CLI diagnostics useful without exposing cookie values."""
@@ -176,6 +200,7 @@ class NotebookLMPyProvider:
         return " ".join(text.split())
 
     async def _open_client(self):
+
         try:
             from notebooklm import NotebookLMClient
         except ImportError as exc:
